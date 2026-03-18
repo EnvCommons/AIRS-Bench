@@ -22,6 +22,7 @@ import pandas as pd
 from datasets import load_from_disk
 from openreward import AsyncOpenReward, SandboxBucketConfig, SandboxSettings
 from openreward.environments import Environment, JSONObject, TextBlock, ToolOutput, tool
+from openreward.toolsets import PDFToolset
 from pydantic import BaseModel
 
 from evaluate import (
@@ -142,6 +143,8 @@ print(json.dumps({"pass_at_5": float(score)}))
 # --- Environment class ---
 
 class AIRSBench(Environment):
+    toolsets = [PDFToolset]
+
     def __init__(self, task_spec: JSONObject, secrets: dict[str, str] = {}) -> None:
         super().__init__(task_spec)
 
@@ -157,7 +160,7 @@ class AIRSBench(Environment):
 
         self.sandbox_settings = SandboxSettings(
             environment="GeneralReasoning/AIRS-Bench",
-            image="generalreasoning/python-ds:3.12-tools",
+            image="generalreasoning/airs-bench-sandbox:latest",
             machine_size="1:2",
             block_network=False,
             bucket_config=SandboxBucketConfig(

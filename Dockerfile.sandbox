@@ -1,0 +1,42 @@
+FROM generalreasoning/python-ds:3.12-tools
+
+# PyTorch CPU (sandboxes don't have GPUs)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Core ML & data
+RUN pip install --no-cache-dir \
+    datasets \
+    torchmetrics \
+    transformers \
+    sentencepiece \
+    scikit-learn \
+    xgboost \
+    lightgbm
+
+# Graph ML (ZINC task)
+RUN pip install --no-cache-dir \
+    torch-geometric \
+    networkx
+
+# Time series (Rideshare, Solar, Kaggle Web Traffic tasks)
+RUN pip install --no-cache-dir \
+    statsmodels \
+    sktime
+
+# NLP evaluation (agents may self-evaluate before submitting)
+RUN pip install --no-cache-dir \
+    rouge_score \
+    evaluate
+
+# PDF toolset dependencies
+RUN pip install --no-cache-dir \
+    pdfplumber \
+    pypdf \
+    reportlab \
+    pdf2image \
+    pymupdf
+
+# Visualization
+RUN pip install --no-cache-dir \
+    matplotlib \
+    seaborn
