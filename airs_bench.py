@@ -294,9 +294,18 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
             result = await self.sandbox.run(f"cat {params.path}")
             output, code = result
             if code != 0:
+                # Exit 141 = SIGPIPE, typically from binary files (PDFs, images, etc.)
+                if code == 141:
+                    msg = (
+                        f"Cannot read {params.path}: binary file. "
+                        "Use the bash tool with Python to extract content "
+                        "(e.g. pymupdf for PDFs, PIL for images)."
+                    )
+                else:
+                    msg = f"Error reading file: exit code {code}"
                 return ToolOutput(
-                    blocks=[TextBlock(text=f"Error reading file: exit code {code}")],
-                    metadata={"error": f"exit code {code}"},
+                    blocks=[TextBlock(text=msg)],
+                    metadata={"error": msg},
                     reward=0.0,
                     finished=False,
                 )
