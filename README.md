@@ -88,10 +88,13 @@ Sandboxed execution environment. Network access is enabled for package installat
 ## Citations
 
 ```bibtex
-@article{lupidi2026airsbench,
-  title={AIRS-Bench: Benchmarking LLM Agents on AI Research Tasks},
-  author={Lupidi, Alberto and others},
-  journal={arXiv preprint arXiv:2602.06855},
-  year={2026}
+@article{lupidi2026airsbenchsuitetasksfrontier,
+      title={AIRS-Bench: a Suite of Tasks for Frontier AI Research Science Agents},
+      author={Alisia Lupidi and Bhavul Gauri and Thomas Simon Foster and Bassel Al Omari and Despoina Magka and Alberto Pepe and Alexis Audran-Reiss and Muna Aghamelu and Nicolas Baldwin and Lucia Cipolina-Kun and Jean-Christophe Gagnon-Audet and Chee Hau Leow and Sandra Lefdal and Hossam Mossalam and Abhinav Moudgil and Saba Nazir and Emanuel Tewolde and Isabel Urrego and Jordi Armengol Estape and Amar Budhiraja and Gaurav Chaurasia and Abhishek Charnalia and Derek Dunfield and Karen Hambardzumyan and Daniel Izcovich and Martin Josifoski and Ishita Mediratta and Kelvin Niu and Parth Pathak and Michael Shvartsman and Edan Toledo and Anton Protopopov and Roberta Raileanu and Alexander Miller and Tatiana Shavrina and Jakob Foerster and Yoram Bachrach},
+      year={2026},
+      eprint={2602.06855},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2602.06855},
 }
 ```
