@@ -1,4 +1,4 @@
-FROM generalreasoning/python-ds:3.12-tools
+FROM generalreasoning/python-ds:3.13-tools
 
 # PyTorch CPU (sandboxes don't have GPUs)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir \
     torchmetrics \
     transformers \
     sentencepiece \
+    protobuf \
     scikit-learn \
     xgboost \
     lightgbm
