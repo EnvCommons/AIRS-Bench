@@ -161,7 +161,7 @@ class AIRSBench(Environment):
         self.sandbox_settings = SandboxSettings(
             environment="GeneralReasoning/AIRS-Bench",
             image="generalreasoning/airs-bench-sandbox:latest",
-            machine_size="1:2",
+            machine_size="2:8",
             block_network=False,
             bucket_config=SandboxBucketConfig(
                 mount_path="/home/ubuntu/data",
@@ -213,7 +213,7 @@ class AIRSBench(Environment):
 
 ## Environment
 
-You have access to a Linux environment with Python 3.12 and common ML libraries installed.
+You have access to a Linux environment with Python 3.13 and common ML libraries installed.
 Your data is mounted at `/home/ubuntu/data/` with `train/` and `test/` subdirectories
 in HuggingFace datasets format. Load them with:
 ```python
