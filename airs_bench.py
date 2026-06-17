@@ -9,6 +9,7 @@ task-specific metrics.
 Paper: arXiv:2602.06855
 """
 
+import asyncio
 import base64
 import io
 import json
@@ -362,6 +363,28 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
                 finished=False,
             )
 
+    async def _with_retry(self, label: str, call, *, max_attempts: int = 4):
+        """Run a flaky sandbox/grader op with exponential backoff, re-raising on
+        persistent failure so the SDK turns it into ToolFailed -> a clean terminal,
+        instead of swallowing a grader/sandbox failure into a fabricated reward.
+        `call` returns a fresh awaitable on each attempt.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                return await call()
+            except Exception as e:
+                last_exc = e
+                if attempt < max_attempts - 1:
+                    wait = min(2 ** attempt, 30)
+                    logger.warning(
+                        "AIRS grader op %r failed (attempt %d/%d): %s — retry in %ss",
+                        label, attempt + 1, max_attempts, e, wait,
+                    )
+                    await asyncio.sleep(wait)
+        assert last_exc is not None
+        raise last_exc
+
     @tool
     async def submit(self, params: SubmitParams) -> ToolOutput:
         """
@@ -381,48 +404,43 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
 
         self.submitted = True
 
-        # Read submission.csv from sandbox
-        try:
-            result = await self.sandbox.run("cat /home/ubuntu/submission.csv")
-            csv_content, code = result
-            if code != 0:
-                return ToolOutput(
-                    blocks=[TextBlock(text="Error: submission.csv not found at /home/ubuntu/submission.csv")],
-                    metadata={"error": "submission.csv not found"},
-                    reward=0.0,
-                    finished=True,
-                )
-        except Exception as e:
+        # Read submission.csv from the sandbox. A non-zero exit = the agent never
+        # produced a submission -> a legitimate incorrect (handled below). A raised
+        # sandbox error is infra: _with_retry retries, then re-raises on a persistent
+        # failure (-> SDK ToolFailed -> clean terminal) rather than fabricating 0.0.
+        csv_content, code = await self._with_retry(
+            "read_submission",
+            lambda: self.sandbox.run("cat /home/ubuntu/submission.csv"),
+        )
+        if code != 0:
             return ToolOutput(
-                blocks=[TextBlock(text=f"Error reading submission: {e}")],
-                metadata={"error": str(e)},
+                blocks=[TextBlock(text="Error: submission.csv not found at /home/ubuntu/submission.csv")],
+                metadata={"error": "submission.csv not found"},
                 reward=0.0,
                 finished=True,
             )
 
-        # Evaluate
-        try:
-            if self.config.metric == "Pass@5":
-                raw_score = await self._eval_pass_at_5_sandbox(csv_content)
-            else:
-                raw_score = self._evaluate_submission(csv_content)
-
-            # Normalize to [0, 1] higher-is-better
-            worst = self.config.estimated_worst_score
-            optimal = self.config.optimal_score
-            if worst != optimal:
-                reward = (worst - raw_score) / (worst - optimal)
-                reward = max(0.0, min(1.0, reward))
-            else:
-                reward = 1.0 if raw_score == optimal else 0.0
-        except Exception as e:
-            logger.exception(f"Evaluation error for {self.task_name}")
-            return ToolOutput(
-                blocks=[TextBlock(text=f"Evaluation error: {e}")],
-                metadata={"error": str(e), "metric": self.config.metric},
-                reward=0.0,
-                finished=True,
+        # Evaluate. The Pass@5 path runs an eval harness in the sandbox (flaky
+        # infra) -> retry-then-raise. A grader/eval failure (sandbox harness crash,
+        # missing ground truth, unparseable submission) is allowed to propagate
+        # (-> ToolFailed -> clean terminal) instead of being scored as a fabricated
+        # 0.0 — we never conflate "couldn't grade" with "graded as worst".
+        if self.config.metric == "Pass@5":
+            raw_score = await self._with_retry(
+                "pass_at_5_eval",
+                lambda: self._eval_pass_at_5_sandbox(csv_content),
             )
+        else:
+            raw_score = self._evaluate_submission(csv_content)
+
+        # Normalize to [0, 1] higher-is-better
+        worst = self.config.estimated_worst_score
+        optimal = self.config.optimal_score
+        if worst != optimal:
+            reward = (worst - raw_score) / (worst - optimal)
+            reward = max(0.0, min(1.0, reward))
+        else:
+            reward = 1.0 if raw_score == optimal else 0.0
 
         result_text = f"""Submission Results:
 - Task: {self.task_name}
