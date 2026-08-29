@@ -71,6 +71,11 @@ for task_name in TASK_NAMES:
 
 # --- Pydantic parameter models ---
 
+# Reward for a submission made after the task has already been graded. Negative
+# so repeat submissions are actively discouraged, not merely left unscored.
+REPEAT_SUBMISSION_PENALTY = -0.1
+
+
 class BashParams(BaseModel, extra="forbid"):
     command: str
 
@@ -396,9 +401,11 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
         """
         if self.submitted:
             return ToolOutput(
-                blocks=[TextBlock(text="Already submitted. Only one submission is allowed.")],
-                metadata={"error": "Already submitted"},
-                reward=0.0,
+                blocks=[TextBlock(text="Already submitted. Only one submission is allowed: this "
+                                       "episode is not re-graded, and repeat submissions are "
+                                       "penalised (reward -0.1).")],
+                metadata={"error": "Already submitted", "already_submitted": True},
+                reward=REPEAT_SUBMISSION_PENALTY,
                 finished=True,
             )
 
