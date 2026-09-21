@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -78,6 +78,9 @@ REPEAT_SUBMISSION_PENALTY = -0.1
 
 class BashParams(BaseModel, extra="forbid"):
     command: str
+    # Optional per-call wall-clock cap in seconds. None defers to the sandbox's
+    # own default rather than imposing a second, shorter one from the schema.
+    timeout: Optional[float] = None
 
 
 class SubmitParams(BaseModel, extra="forbid"):
@@ -246,7 +249,8 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
     @tool
     async def bash(self, params: BashParams) -> ToolOutput:
         """Executes a bash command in the sandbox environment."""
-        result = await self.sandbox.run(params.command.strip())
+        run_kwargs = {} if params.timeout is None else {"timeout": params.timeout}
+        result = await self.sandbox.run(params.command.strip(), **run_kwargs)
         output, code = result
 
         if result.truncated:
