@@ -389,3 +389,207 @@ class TestRewardNormalization:
     def test_above_optimal_clips(self):
         # If somehow raw_score > optimal for accuracy, clip to 1.0
         assert self._normalize(1.1, worst=0.0, optimal=1.0) == pytest.approx(1.0)
+
+
+# --- submit / sandbox I/O tests ---
+
+
+import asyncio
+import base64
+import re
+
+from openreward.api.sandboxes.types import RunResult
+
+
+class FakeSandbox:
+    """In-memory stand-in for the SDK sandbox handle.
+
+    Mirrors the SDK contract: run() returns a RunResult (unpacks as
+    (output, return_code), not subscriptable) whose output keeps only the first
+    max_bytes characters (default 50_000); download() returns the whole file and
+    raises when the file is missing.
+    """
+
+    def __init__(self, files=None):
+        self.files: dict[str, bytes] = dict(files or {})
+        self.commands: list[str] = []
+
+    async def run(self, cmd, timeout=300, max_bytes=50_000, sanitise=True):
+        self.commands.append(cmd)
+        await asyncio.sleep(0)
+        if m := re.fullmatch(r"test -f (\S+)", cmd):
+            return RunResult("", 0 if m.group(1) in self.files else 1)
+        if m := re.fullmatch(r"cat (\S+)", cmd):
+            if m.group(1) not in self.files:
+                return RunResult(f"cat: {m.group(1)}: No such file or directory", 1)
+            output = self.files[m.group(1)].decode()
+            truncated = max_bytes is not None and len(output) > max_bytes
+            if truncated:
+                output = output[:max_bytes]
+            return RunResult(output, 0, truncated=truncated)
+        if m := re.fullmatch(r"printf '%s' '([A-Za-z0-9+/=]*)' \| base64 -d > (\S+)", cmd):
+            self.files[m.group(2)] = base64.b64decode(m.group(1))
+            return RunResult("", 0)
+        if cmd.startswith("mkdir -p "):
+            return RunResult("", 0)
+        raise NotImplementedError(cmd)
+
+    async def download(self, path):
+        await asyncio.sleep(0)
+        if path not in self.files:
+            raise RuntimeError(f"Command failed: base64 {path}\nNo such file or directory")
+        return self.files[path]
+
+
+YELP = "SentimentAnalysisYelpReviewFullAccuracy"
+APPS = "CodeGenerationAPPSPassAt5"
+SUBMISSION = "/home/ubuntu/submission.csv"
+
+
+def _make_env(monkeypatch, tmp_path, task_name, labels=None, files=None):
+    import airs_bench
+    from datasets import Dataset
+
+    if labels is not None:
+        Dataset.from_dict(labels).save_to_disk(str(tmp_path / task_name / "test_with_labels"))
+    monkeypatch.setattr(airs_bench, "DATA_DIR", tmp_path)
+
+    real_sleep = asyncio.sleep
+
+    async def no_sleep(_):
+        # Skip retry backoff but still yield to the event loop.
+        await real_sleep(0)
+
+    monkeypatch.setattr(airs_bench.asyncio, "sleep", no_sleep)
+    env = airs_bench.AIRSBench(
+        task_spec={"id": task_name, "task_name": task_name},
+        secrets={"api_key": "test-key"},
+    )
+    env.sandbox = FakeSandbox(files)
+    return env
+
+
+def _csv(header, values):
+    return ("\n".join([header] + [str(v) for v in values]) + "\n").encode()
+
+
+class TestSubmit:
+    @pytest.mark.asyncio
+    async def test_large_submission_is_read_in_full(self, monkeypatch, tmp_path):
+        # 30,000 single-digit rows is ~60 KB, past the 50 KB run() output cap.
+        n = 30_000
+        env = _make_env(
+            monkeypatch, tmp_path, YELP,
+            labels={"label": [3] * n},
+            files={SUBMISSION: _csv("label", [3] * n)},
+        )
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True
+        assert result.metadata["raw_score"] == pytest.approx(1.0)
+        assert result.reward == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_missing_submission_is_not_graded(self, monkeypatch, tmp_path):
+        env = _make_env(monkeypatch, tmp_path, YELP, labels={"label": [1, 2, 3]})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert result.reward == 0.0
+        assert "not found" in result.blocks[0].text
+
+        env.sandbox.files[SUBMISSION] = _csv("label", [1, 2, 3])
+        result = await env.submit(SubmitParams())
+        assert result.finished is True
+        assert result.reward == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_row_count_mismatch_returns_feedback_and_allows_resubmit(self, monkeypatch, tmp_path):
+        labels = [0, 1, 2, 3, 4] * 4
+        env = _make_env(
+            monkeypatch, tmp_path, YELP,
+            labels={"label": labels},
+            files={SUBMISSION: _csv("label", labels[:10])},
+        )
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert result.reward == 0.0
+        assert "Row count mismatch: 10 predictions vs 20 labels" in result.blocks[0].text
+        assert result.metadata["graded"] is False
+
+        env.sandbox.files[SUBMISSION] = _csv("label", labels)
+        result = await env.submit(SubmitParams())
+        assert result.finished is True
+        assert result.reward == pytest.approx(1.0)
+        assert "already_submitted" not in result.metadata
+
+    @pytest.mark.asyncio
+    async def test_unparsable_value_returns_feedback(self, monkeypatch, tmp_path):
+        env = _make_env(
+            monkeypatch, tmp_path, YELP,
+            labels={"label": [1, 2, 3]},
+            files={SUBMISSION: _csv("label", [1, "abc", 3])},
+        )
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert "ValueError" in result.blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_missing_ground_truth_raises(self, monkeypatch, tmp_path):
+        env = _make_env(monkeypatch, tmp_path, YELP, files={SUBMISSION: _csv("label", [1])})
+        from airs_bench import SubmitParams
+        with pytest.raises(FileNotFoundError):
+            await env.submit(SubmitParams())
+
+    @pytest.mark.asyncio
+    async def test_concurrent_submits_grade_once(self, monkeypatch, tmp_path):
+        env = _make_env(
+            monkeypatch, tmp_path, YELP,
+            labels={"label": [1, 2, 3]},
+            files={SUBMISSION: _csv("label", [1, 2, 3])},
+        )
+        from airs_bench import SubmitParams
+        results = await asyncio.gather(env.submit(SubmitParams()), env.submit(SubmitParams()))
+        graded = [r for r in results if "raw_score" in r.metadata]
+        repeats = [r for r in results if r.metadata.get("already_submitted")]
+        assert len(graded) == 1 and len(repeats) == 1
+        assert graded[0].reward == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("header,rows", [
+        ("code1,code2,code3,code4,code5", ["a,b,c,d,e"] * 2),
+        ("code1,code2,code3,code4", ["a,b,c,d"] * 3),
+    ])
+    async def test_pass_at_5_malformed_submission_returns_feedback(self, monkeypatch, tmp_path, header, rows):
+        env = _make_env(
+            monkeypatch, tmp_path, APPS,
+            labels={"input_output": ["{}"] * 3},
+            files={SUBMISSION: _csv(header, rows)},
+        )
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert result.reward == 0.0
+        assert result.metadata["graded"] is False
+        assert not any("run_eval.py" in c for c in env.sandbox.commands)
+
+    @pytest.mark.asyncio
+    async def test_upload_file_to_sandbox(self, monkeypatch, tmp_path):
+        env = _make_env(monkeypatch, tmp_path, APPS)
+        await env._upload_file_to_sandbox("print('hi')\n", "/tmp/eval/x.py")
+        assert env.sandbox.files["/tmp/eval/x.py"] == b"print('hi')\n"
+
+
+class TestReadFile:
+    @pytest.mark.asyncio
+    async def test_reports_truncation(self, monkeypatch, tmp_path):
+        env = _make_env(
+            monkeypatch, tmp_path, YELP,
+            files={"/home/ubuntu/big.txt": b"x" * 60_000},
+        )
+        from airs_bench import ReadFileInput
+        result = await env.read_file(ReadFileInput(path="/home/ubuntu/big.txt"))
+        assert "truncated" in result.blocks[0].text
+        assert result.metadata["truncated"] is True
