@@ -75,6 +75,14 @@ for task_name in TASK_NAMES:
 # so repeat submissions are actively discouraged, not merely left unscored.
 REPEAT_SUBMISSION_PENALTY = -0.1
 
+SUBMISSION_PATH = "/home/ubuntu/submission.csv"
+PASS_AT_5_COLUMNS = ["code1", "code2", "code3", "code4", "code5"]
+
+# Errors raised while parsing or scoring a malformed submission.csv (wrong row
+# count, missing column, unparsable value). These are the agent's to fix, so the
+# submission is reported back ungraded instead of failing the tool call.
+SUBMISSION_ERRORS = (ValueError, KeyError, TypeError, IndexError, SyntaxError)
+
 
 class BashParams(BaseModel, extra="forbid"):
     command: str
@@ -190,8 +198,10 @@ class AIRSBench(Environment):
             logger.warning(f"project_description.md not found for {self.task_name}")
             self.project_description = f"Task: {self.task_name}"
 
-        # Track submission
+        # Track submission. The lock serialises submit calls so a submission is
+        # graded at most once even when calls arrive concurrently.
         self.submitted = False
+        self._submit_lock = asyncio.Lock()
         self.todos: List[Dict[str, Any]] = []
 
     async def setup(self) -> None:
@@ -306,6 +316,7 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
         try:
             result = await self.sandbox.run(f"cat {params.path}")
             output, code = result
+            truncated = result.truncated
             if code != 0:
                 # Exit 141 = SIGPIPE, typically from binary files (PDFs, images, etc.)
                 if code == 141:
@@ -322,12 +333,13 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
                     reward=0.0,
                     finished=False,
                 )
-            if len(output) > 50000:
+            if truncated or len(output) > 50000:
+                truncated = True
                 output = output[:50000] + "\n...(truncated, file too large)"
 
             return ToolOutput(
                 blocks=[TextBlock(text=output)],
-                metadata={"output": output},
+                metadata={"output": output, "truncated": truncated},
                 reward=0.0,
                 finished=False,
             )
@@ -401,8 +413,14 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
 
         Reads /home/ubuntu/submission.csv from the sandbox, evaluates it against
         ground truth labels using the task's metric, and returns the score.
-        This is a terminal action — you get one submission.
+        This is a terminal action — you get one graded submission. A submission
+        that cannot be evaluated (missing file, wrong row count, bad format) is
+        not graded and can be fixed and submitted again.
         """
+        async with self._submit_lock:
+            return await self._submit()
+
+    async def _submit(self) -> ToolOutput:
         if self.submitted:
             return ToolOutput(
                 blocks=[TextBlock(text="Already submitted. Only one submission is allowed: this "
@@ -413,36 +431,62 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
                 finished=True,
             )
 
-        self.submitted = True
-
-        # Read submission.csv from the sandbox. A non-zero exit = the agent never
-        # produced a submission -> a legitimate incorrect (handled below). A raised
-        # sandbox error is infra: _with_retry retries, then re-raises on a persistent
-        # failure (-> SDK ToolFailed -> clean terminal) rather than fabricating 0.0.
-        csv_content, code = await self._with_retry(
-            "read_submission",
-            lambda: self.sandbox.run("cat /home/ubuntu/submission.csv"),
+        # A missing submission.csv is the agent's to fix: report it ungraded so
+        # it can write the file and submit again. A raised sandbox error is
+        # infra: _with_retry retries, then re-raises on a persistent failure
+        # (-> SDK ToolFailed -> clean terminal) rather than fabricating 0.0.
+        _, exists_code = await self._with_retry(
+            "check_submission",
+            lambda: self.sandbox.run(f"test -f {SUBMISSION_PATH}"),
         )
-        if code != 0:
+        if exists_code != 0:
             return ToolOutput(
-                blocks=[TextBlock(text="Error: submission.csv not found at /home/ubuntu/submission.csv")],
-                metadata={"error": "submission.csv not found"},
+                blocks=[TextBlock(text=f"Error: submission.csv not found at {SUBMISSION_PATH}. "
+                                       "Nothing was graded. Write your predictions there and "
+                                       "call submit again.")],
+                metadata={"error": "submission.csv not found", "graded": False},
                 reward=0.0,
-                finished=True,
+                finished=False,
             )
+
+        # download() returns the whole file; run("cat ...") caps output at
+        # 50 KB and would silently cut large submissions.
+        csv_bytes = await self._with_retry(
+            "read_submission",
+            lambda: self.sandbox.download(SUBMISSION_PATH),
+        )
 
         # Evaluate. The Pass@5 path runs an eval harness in the sandbox (flaky
         # infra) -> retry-then-raise. A grader/eval failure (sandbox harness crash,
-        # missing ground truth, unparseable submission) is allowed to propagate
-        # (-> ToolFailed -> clean terminal) instead of being scored as a fabricated
-        # 0.0 — we never conflate "couldn't grade" with "graded as worst".
+        # missing ground truth) is allowed to propagate (-> ToolFailed -> clean
+        # terminal) instead of being scored as a fabricated 0.0 — we never
+        # conflate "couldn't grade" with "graded as worst". A malformed
+        # submission is reported back ungraded so the agent can fix it.
+        try:
+            csv_content = csv_bytes.decode("utf-8")
+            if self.config.metric == "Pass@5":
+                self._check_pass_at_5_submission(csv_content)
+            else:
+                raw_score = self._evaluate_submission(csv_content)
+        except SUBMISSION_ERRORS as e:
+            msg = f"{type(e).__name__}: {e}"
+            if len(msg) > 1000:
+                msg = msg[:1000] + "...(truncated)"
+            return ToolOutput(
+                blocks=[TextBlock(text=f"Error: submission.csv could not be evaluated: {msg}\n"
+                                       "Nothing was graded. Fix the file and call submit again.")],
+                metadata={"error": msg, "graded": False},
+                reward=0.0,
+                finished=False,
+            )
+
         if self.config.metric == "Pass@5":
             raw_score = await self._with_retry(
                 "pass_at_5_eval",
                 lambda: self._eval_pass_at_5_sandbox(csv_content),
             )
-        else:
-            raw_score = self._evaluate_submission(csv_content)
+
+        self.submitted = True
 
         # Normalize to [0, 1] higher-is-better
         worst = self.config.estimated_worst_score
@@ -642,6 +686,24 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
         train_targets = labels_ds["target"]
         return time_series_mae(preds, label_targets, train_targets)
 
+    def _check_pass_at_5_submission(self, csv_content: str) -> None:
+        """Validate the Pass@5 submission's shape before running the sandbox
+        harness, so a malformed file is reported to the agent rather than
+        surfacing as a harness failure."""
+        labels_dir = DATA_DIR / self.task_name / "test_with_labels"
+        if not labels_dir.exists():
+            raise FileNotFoundError(f"Ground truth not found at {labels_dir}")
+        n_problems = len(load_from_disk(str(labels_dir)))
+
+        submission_df = pd.read_csv(io.StringIO(csv_content))
+        missing = [c for c in PASS_AT_5_COLUMNS if c not in submission_df.columns]
+        if missing:
+            raise KeyError(f"missing column(s) {missing}; expected {PASS_AT_5_COLUMNS}")
+        if len(submission_df) != n_problems:
+            raise ValueError(
+                f"Row count mismatch: {len(submission_df)} submissions vs {n_problems} test problems"
+            )
+
     async def _eval_pass_at_5_sandbox(self, csv_content: str) -> float:
         """
         Run Pass@5 evaluation inside the sandbox.
@@ -685,11 +747,13 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
 
         if eval_code != 0:
             # Read error log for diagnostics
-            error_log_result = await self.sandbox.run("tail -50 /tmp/eval/eval.log")
-            error_log = error_log_result[0] if error_log_result[1] == 0 else "could not read error log"
-            raise RuntimeError(
-                f"Pass@5 evaluation failed (exit {eval_code}):\n{error_log}"
-            )
+            # The log can echo hidden test cases, so it stays in the server log
+            # and out of the raised message, which the agent sees.
+            error_log, log_code = await self.sandbox.run("tail -50 /tmp/eval/eval.log")
+            if log_code != 0:
+                error_log = "could not read error log"
+            logger.error("Pass@5 evaluation failed (exit %s):\n%s", eval_code, error_log)
+            raise RuntimeError(f"Pass@5 evaluation failed (exit {eval_code})")
 
         # Parse the JSON result from stdout
         try:
@@ -705,8 +769,8 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
     async def _upload_file_to_sandbox(self, content: str, remote_path: str) -> None:
         """Upload a text file to the sandbox via base64 encoding."""
         encoded = base64.b64encode(content.encode()).decode()
-        result = await self.sandbox.run(
+        output, code = await self.sandbox.run(
             f"printf '%s' '{encoded}' | base64 -d > {remote_path}"
         )
-        if result[1] != 0:
-            raise RuntimeError(f"Failed to upload {remote_path}: {result[0]}")
+        if code != 0:
+            raise RuntimeError(f"Failed to upload {remote_path}: {output}")
