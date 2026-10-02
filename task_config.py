@@ -33,6 +33,12 @@ class TaskConfig:
     optimal_score: float = 1.0
     # Submission format hints
     submission_columns: list[str] = field(default_factory=lambda: ["prediction"])
+    # Factor applied to the ground-truth scoring column before grading, for
+    # tasks whose agent-visible labels are in different units (meV vs eV).
+    label_scale: float = 1.0
+    # Time series tasks: number of future steps forecast per series. The
+    # ground truth is the source test split, whose series end with these steps.
+    forecast_horizon: int | None = None
 
 
 TASKS: dict[str, TaskConfig] = {
@@ -287,6 +293,8 @@ TASKS: dict[str, TaskConfig] = {
         estimated_worst_score=11185110,
         optimal_score=0.0,
         submission_columns=["G"],
+        # Train labels and the task description are in meV; the source test split is in eV.
+        label_scale=1000.0,
     ),
     "R2AbsMolecularPropertyPredictionQm9MeanAbsoluteError": TaskConfig(
         name="R2AbsMolecularPropertyPredictionQm9MeanAbsoluteError",
@@ -302,7 +310,9 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["R_2_Abs"],
         custom_gold_labels=False,
         sota_score=0.010,
-        estimated_worst_score=6536.567,
+        # Test-set MAE of predicting the train-set mean of R_2_Abs (1189.97)
+        # for every molecule, so a trivial model scores 0 rather than ~0.97.
+        estimated_worst_score=201.874,
         optimal_score=0.0,
         submission_columns=["R_2_Abs"],
     ),
@@ -323,6 +333,8 @@ TASKS: dict[str, TaskConfig] = {
         estimated_worst_score=24183970,
         optimal_score=0.0,
         submission_columns=["U_0"],
+        # Train labels and the task description are in meV; the source test split is in eV.
+        label_scale=1000.0,
     ),
     "GraphRegressionZincMae": TaskConfig(
         name="GraphRegressionZincMae",
@@ -359,6 +371,7 @@ TASKS: dict[str, TaskConfig] = {
         estimated_worst_score=502962963078372,
         optimal_score=0.0,
         submission_columns=["prediction"],
+        forecast_horizon=59,
     ),
     "TimeSeriesForecastingRideshareMAE": TaskConfig(
         name="TimeSeriesForecastingRideshareMAE",
@@ -377,6 +390,7 @@ TASKS: dict[str, TaskConfig] = {
         estimated_worst_score=30.22490,
         optimal_score=0.0,
         submission_columns=["prediction"],
+        forecast_horizon=48,
     ),
     "TimeSeriesForecastingSolarWeeklyMAE": TaskConfig(
         name="TimeSeriesForecastingSolarWeeklyMAE",
@@ -395,6 +409,7 @@ TASKS: dict[str, TaskConfig] = {
         estimated_worst_score=34761.99,
         optimal_score=0.0,
         submission_columns=["prediction"],
+        forecast_horizon=5,
     ),
 }
 

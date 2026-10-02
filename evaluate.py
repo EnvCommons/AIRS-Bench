@@ -327,6 +327,11 @@ def time_series_mae(predictions, labels, train_targets=None, forecast_horizon=No
 
     If train_targets is provided, extracts forecast portion from labels.
     """
+    if len(predictions) != len(labels):
+        raise ValueError(
+            f"Row count mismatch: {len(predictions)} predictions vs {len(labels)} series"
+        )
+
     all_preds = []
     all_labels = []
 
@@ -346,6 +351,11 @@ def time_series_mae(predictions, labels, train_targets=None, forecast_horizon=No
         if train_targets is not None:
             train_size = np.array(train_targets[i]).shape[0]
             label = label[train_size:]
+
+        if pred.shape != label.shape:
+            raise ValueError(
+                f"Row {i}: prediction has shape {pred.shape}, expected {label.shape}"
+            )
 
         all_preds.append(pred)
         all_labels.append(label)
