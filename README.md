@@ -47,6 +47,10 @@ Each agent sandbox runs with 1 CPU and 2GB RAM. Network access is enabled for pa
 | TimeSeries | TimeSeriesForecastingRideshareMAE | MAE |
 | TimeSeries | TimeSeriesForecastingSolarWeeklyMAE | MAE |
 
+TimeSeriesForecastingKaggleWebTrafficMASE is not served: a submission is 145,063 full-length series (about 1 GB of CSV), too large to grade in the environment server. `list_tasks` returns the other 19.
+
+`check_ground_truth.py` checks each task's ground truth against its grader: the columns it reads exist, a submission reproducing the labels scores the optimum, and the agent's test split has one row per label.
+
 ## Reward Structure
 
 Raw metric values are returned as rewards. Metadata includes `lower_is_better` and `metric` fields so the platform can interpret the score correctly. Accuracy-type metrics range 0-1 (higher is better); MAE/MASE metrics are unbounded (lower is better).

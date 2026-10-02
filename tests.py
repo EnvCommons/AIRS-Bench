@@ -593,3 +593,180 @@ class TestReadFile:
         result = await env.read_file(ReadFileInput(path="/home/ubuntu/big.txt"))
         assert "truncated" in result.blocks[0].text
         assert result.metadata["truncated"] is True
+
+
+# --- ground truth as deployed ---
+
+# Columns of each task's deployed ground truth (server_data/<task>/test_with_labels),
+# which is the source dataset's evaluation split as published. check_ground_truth.py
+# checks the deployed data itself.
+DEPLOYED_GROUND_TRUTH_COLUMNS = {
+    "CodeGenerationAPPSPassAt5": ['problem_id', 'question', 'solutions', 'input_output', 'difficulty', 'url', 'starter_code'],
+    "CodeRetrievalCodeXGlueMRR": ['id', 'repo', 'path', 'func_name', 'original_string', 'language', 'code', 'code_tokens', 'docstring', 'docstring_tokens', 'sha', 'url', 'docstring_summary', 'parameters', 'return_statement', 'argument_list', 'identifier', 'nwo', 'score'],
+    "CoreferenceResolutionSuperGLUEWSCAccuracy": ['text', 'span1_index', 'span2_index', 'span1_text', 'span2_text', 'idx', 'label'],
+    "CoreferenceResolutionWinograndeAccuracy": ['sentence', 'option1', 'option2', 'answer'],
+    "CvMolecularPropertyPredictionQm9MeanAbsoluteError": ['pos', 'atomic_numbers', 'mu', 'alpha', 'eps_HOMO', 'eps_LUMO', 'delta_eps', 'R_2_Abs', 'ZPVE', 'U_0', 'U', 'H', 'G', 'c_v', 'U_0_ATOM', 'U_ATOM', 'H_ATOM', 'G_ATOM', 'A', 'B', 'C', 'tags', 'natoms', 'id', 'composition'],
+    "GMolecularPropertyPredictionQm9MeanAbsoluteError": ['pos', 'atomic_numbers', 'mu', 'alpha', 'eps_HOMO', 'eps_LUMO', 'delta_eps', 'R_2_Abs', 'ZPVE', 'U_0', 'U', 'H', 'G', 'c_v', 'U_0_ATOM', 'U_ATOM', 'H_ATOM', 'G_ATOM', 'A', 'B', 'C', 'tags', 'natoms', 'id', 'composition'],
+    "GraphRegressionZincMae": ['node_feat', 'edge_index', 'edge_attr', 'y', 'num_nodes'],
+    "MathQuestionAnsweringSVAMPAccuracy": ['ID', 'Body', 'Question', 'Equation', 'Answer', 'Type', 'question_concat'],
+    "QuestionAnsweringDuoRCAccuracy": ['plot_id', 'plot', 'title', 'question_id', 'question', 'answers', 'no_answer'],
+    "QuestionAnsweringEli5Rouge1": ['q_id', 'title', 'selftext', 'document', 'subreddit', 'url', 'answers', 'title_urls', 'selftext_urls', 'answers_urls'],
+    "QuestionAnsweringFinqaAccuracy": ['id', 'post_text', 'pre_text', 'question', 'answer', 'gold_evidence', 'table'],
+    "R2AbsMolecularPropertyPredictionQm9MeanAbsoluteError": ['pos', 'atomic_numbers', 'mu', 'alpha', 'eps_HOMO', 'eps_LUMO', 'delta_eps', 'R_2_Abs', 'ZPVE', 'U_0', 'U', 'H', 'G', 'c_v', 'U_0_ATOM', 'U_ATOM', 'H_ATOM', 'G_ATOM', 'A', 'B', 'C', 'tags', 'natoms', 'id', 'composition'],
+    "ReadingComprehensionSquadExactMatch": ['id', 'title', 'context', 'question', 'answers'],
+    "SentimentAnalysisYelpReviewFullAccuracy": ['label', 'text'],
+    "TextualClassificationSickAccuracy": ['id', 'sentence_A', 'sentence_B', 'label', 'relatedness_score', 'entailment_AB', 'entailment_BA', 'sentence_A_original', 'sentence_B_original', 'sentence_A_dataset', 'sentence_B_dataset'],
+    "TextualSimilaritySickSpearmanCorrelation": ['id', 'sentence_A', 'sentence_B', 'label', 'relatedness_score', 'entailment_AB', 'entailment_BA', 'sentence_A_original', 'sentence_B_original', 'sentence_A_dataset', 'sentence_B_dataset'],
+    "TimeSeriesForecastingKaggleWebTrafficMASE": ['start', 'target', 'feat_static_cat', 'feat_dynamic_real', 'item_id'],
+    "TimeSeriesForecastingRideshareMAE": ['start', 'target', 'feat_static_cat', 'feat_dynamic_real', 'item_id'],
+    "TimeSeriesForecastingSolarWeeklyMAE": ['start', 'target', 'feat_static_cat', 'feat_dynamic_real', 'item_id'],
+    "U0MolecularPropertyPredictionQm9MeanAbsoluteError": ['pos', 'atomic_numbers', 'mu', 'alpha', 'eps_HOMO', 'eps_LUMO', 'delta_eps', 'R_2_Abs', 'ZPVE', 'U_0', 'U', 'H', 'G', 'c_v', 'U_0_ATOM', 'U_ATOM', 'H_ATOM', 'G_ATOM', 'A', 'B', 'C', 'tags', 'natoms', 'id', 'composition'],
+}
+
+SOLAR = "TimeSeriesForecastingSolarWeeklyMAE"
+RIDESHARE = "TimeSeriesForecastingRideshareMAE"
+KAGGLE = "TimeSeriesForecastingKaggleWebTrafficMASE"
+CODE_RETRIEVAL = "CodeRetrievalCodeXGlueMRR"
+QM9_G = "GMolecularPropertyPredictionQm9MeanAbsoluteError"
+QM9_U0 = "U0MolecularPropertyPredictionQm9MeanAbsoluteError"
+QM9_R2 = "R2AbsMolecularPropertyPredictionQm9MeanAbsoluteError"
+
+
+def _series(n, start=0.0):
+    return [float(start + i) for i in range(n)]
+
+
+def _json_rows(header, rows):
+    import json
+    return ("\n".join([header] + ['"' + json.dumps(r) + '"' for r in rows]) + "\n").encode()
+
+
+def _deployed_case(task):
+    """(ground truth in the deployed schema, submission that reproduces it).
+
+    Submissions follow each task's project description: time series rows are
+    JSON lists (Solar and Rideshare: the forecast steps of one series; Kaggle:
+    the full series), QM9 G and U_0 are in meV.
+    """
+    if task == SOLAR:
+        targets = [_series(10), _series(10, 100.0)]
+        gt = {"target": targets, "feat_dynamic_real": [None, None]}
+        return gt, _json_rows("label_target", [t[-5:] for t in targets])
+    if task == RIDESHARE:
+        # Each row holds two target series and one covariate series, all forecast.
+        rows = [([_series(50), _series(50, 1.0)], [_series(50, 2.0)]),
+                ([_series(50, 3.0), _series(50, 4.0)], [_series(50, 5.0)])]
+        gt = {"target": [t for t, _ in rows], "feat_dynamic_real": [d for _, d in rows]}
+        series = [s for t, d in rows for s in t + d]
+        return gt, _json_rows("label_target", [s[-48:] for s in series])
+    if task == KAGGLE:
+        targets = [[float((i * 7) % 5 + j) for i in range(70)] for j in range(2)]
+        return {"target": targets}, _json_rows("label_target", targets)
+    if task == CODE_RETRIEVAL:
+        gt = {"docstring_tokens": [["sort", "a", "list"], ["read", "a", "file"]], "id": [0, 1]}
+        csv = b'query,rankings\nsort a list,"[0, 1]"\nread a file,"[1, 0]"\n'
+        return gt, csv
+    if task in (QM9_G, QM9_U0):
+        col = TASKS[task].scoring_column
+        ev = [-11185.25, -10500.5, -9800.75]
+        return {col: ev}, _csv(col, [v * 1000 for v in ev])
+    if task == YELP:
+        return {"label": [0, 4, 2]}, _csv("label", [0, 4, 2])
+    raise KeyError(task)
+
+
+@pytest.mark.parametrize("task_name", TASK_NAMES)
+def test_grader_reads_only_deployed_columns(task_name):
+    import airs_bench
+    env = airs_bench.AIRSBench(
+        task_spec={"id": task_name, "task_name": task_name}, secrets={"api_key": "test-key"},
+    )
+    missing = set(env._ground_truth_columns()) - set(DEPLOYED_GROUND_TRUTH_COLUMNS[task_name])
+    assert not missing
+
+
+class TestDeployedGroundTruth:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task_name", [SOLAR, RIDESHARE, KAGGLE, CODE_RETRIEVAL, QM9_G, QM9_U0, YELP])
+    async def test_correct_submission_scores_optimum(self, monkeypatch, tmp_path, task_name):
+        gt, csv = _deployed_case(task_name)
+        assert set(gt) <= set(DEPLOYED_GROUND_TRUTH_COLUMNS[task_name])
+        env = _make_env(monkeypatch, tmp_path, task_name, labels=gt, files={SUBMISSION: csv})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True, result.blocks[0].text
+        assert result.metadata["raw_score"] == pytest.approx(TASKS[task_name].optimal_score, abs=1e-9)
+        assert result.reward == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_missing_ground_truth_column_raises(self, monkeypatch, tmp_path):
+        # The grader's data is at fault, so the agent must not be told to fix its CSV.
+        env = _make_env(
+            monkeypatch, tmp_path, YELP,
+            labels={"text": ["a", "b", "c"]},
+            files={SUBMISSION: _csv("label", [1, 2, 3])},
+        )
+        from airs_bench import GroundTruthError, SubmitParams
+        with pytest.raises(GroundTruthError, match=r"lacks column\(s\) \['label'\]"):
+            await env.submit(SubmitParams())
+        assert env.submitted is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("rows,expected", [
+        ([[1.0] * 5], "Row count mismatch: 1 predictions vs 2 series"),
+        ([[1.0] * 4, [1.0] * 5], "Row 0: prediction has shape (4,), expected (5,)"),
+    ])
+    async def test_time_series_malformed_submission_returns_feedback(self, monkeypatch, tmp_path, rows, expected):
+        gt, _ = _deployed_case(SOLAR)
+        env = _make_env(monkeypatch, tmp_path, SOLAR, labels=gt,
+                        files={SUBMISSION: _json_rows("label_target", rows)})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert result.metadata["graded"] is False
+        assert expected in result.blocks[0].text
+
+    def test_unservable_task_is_not_listed(self, tmp_path):
+        # Import a copy of the env next to a server_data/ holding every task,
+        # so list_tasks sees data for all of them.
+        import json
+        import shutil
+        import subprocess
+        import sys
+        from pathlib import Path
+        here = Path(__file__).parent
+        for f in ("airs_bench.py", "evaluate.py", "task_config.py"):
+            shutil.copy(here / f, tmp_path / f)
+        for name in TASK_NAMES:
+            (tmp_path / "server_data" / name).mkdir(parents=True)
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import json, airs_bench; print(json.dumps([t['id'] for t in airs_bench.AIRSBench.list_tasks('train')]))"],
+            cwd=tmp_path, capture_output=True, text=True, check=True,
+        ).stdout
+        ids = json.loads(out.strip().splitlines()[-1])
+        assert KAGGLE not in ids
+        assert ids == [n for n in TASK_NAMES if n != KAGGLE]
+
+
+class TestR2AbsNormalisation:
+    """The worst score for R_2_Abs is the MAE of predicting the train mean, so
+    a trivial model scores 0 and a good model's score still varies with its MAE."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("offset,expected", [
+        (201.874, 0.0),
+        (3.0, 1 - 3.0 / 201.874),
+        (0.0, 1.0),
+    ])
+    async def test_reward_for_mae(self, monkeypatch, tmp_path, offset, expected):
+        labels = [1000.0, 1200.0, 1400.0]
+        env = _make_env(
+            monkeypatch, tmp_path, QM9_R2,
+            labels={"R_2_Abs": labels},
+            files={SUBMISSION: _csv("R_2_Abs", [v + offset for v in labels])},
+        )
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.metadata["raw_score"] == pytest.approx(offset)
+        assert result.reward == pytest.approx(expected, abs=1e-6)

@@ -50,10 +50,19 @@ if os.path.exists("/orwd_data"):
 else:
     DATA_DIR = Path(__file__).parent / "server_data"
 
+# Tasks that are not served, with the reason.
+EXCLUDED_TASKS = {
+    # A submission is 145,063 full-length series (about 1 GB of CSV), which is
+    # too large to download and grade inside the environment server.
+    "TimeSeriesForecastingKaggleWebTrafficMASE": "submission too large to grade",
+}
+
 # Build task specs at module level for stable ordering
 # Only include tasks that have data available
 _task_specs: list[JSONObject] = []
 for task_name in TASK_NAMES:
+    if task_name in EXCLUDED_TASKS:
+        continue
     task_data_dir = DATA_DIR / task_name
     if not task_data_dir.exists():
         logging.getLogger(__name__).warning(f"Skipping {task_name}: no data at {task_data_dir}")
@@ -82,6 +91,12 @@ PASS_AT_5_COLUMNS = ["code1", "code2", "code3", "code4", "code5"]
 # count, missing column, unparsable value). These are the agent's to fix, so the
 # submission is reported back ungraded instead of failing the tool call.
 SUBMISSION_ERRORS = (ValueError, KeyError, TypeError, IndexError, SyntaxError)
+
+
+class GroundTruthError(RuntimeError):
+    """The server-side ground truth can't be read the way the task's grader
+    needs. This is the environment's fault, so it is raised rather than
+    reported to the agent as a submission it should fix."""
 
 
 class BashParams(BaseModel, extra="forbid"):
@@ -456,6 +471,11 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
             lambda: self.sandbox.download(SUBMISSION_PATH),
         )
 
+        # Ground truth is loaded outside the submission-error handler below, so
+        # a problem with it (missing file, missing column) raises instead of
+        # asking the agent to fix a CSV that isn't at fault.
+        labels = self._load_labels()
+
         # Evaluate. The Pass@5 path runs an eval harness in the sandbox (flaky
         # infra) -> retry-then-raise. A grader/eval failure (sandbox harness crash,
         # missing ground truth) is allowed to propagate (-> ToolFailed -> clean
@@ -465,9 +485,9 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
         try:
             csv_content = csv_bytes.decode("utf-8")
             if self.config.metric == "Pass@5":
-                self._check_pass_at_5_submission(csv_content)
+                self._check_pass_at_5_submission(csv_content, labels)
             else:
-                raw_score = self._evaluate_submission(csv_content)
+                raw_score = self._evaluate_submission(csv_content, labels)
         except SUBMISSION_ERRORS as e:
             msg = f"{type(e).__name__}: {e}"
             if len(msg) > 1000:
@@ -549,152 +569,148 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
 
     # --- Evaluation logic ---
 
-    def _evaluate_submission(self, csv_content: str) -> float:
+    def _ground_truth_columns(self) -> list[str]:
+        """Columns of the ground-truth dataset that the task's grader reads."""
+        metric = self.config.metric
+        if metric == "DuoRCAccuracy":
+            return ["answers", "no_answer"]
+        if metric in ("ExactMatch", "Rouge1"):
+            return ["answers"]
+        if metric == "MRR":
+            return ["docstring_tokens", "id"]
+        if metric == "MASE":
+            return ["target"]
+        if metric == "TimeSeriesMAE":
+            return ["target", "feat_dynamic_real"]
+        return [self.config.scoring_column]
+
+    def _load_labels(self) -> Any:
+        """Load the task's ground truth and extract the labels its metric needs.
+
+        The ground truth is the source dataset's evaluation split as published,
+        without per-task preprocessing; this method applies it.
+        Problems with it are the environment's, so they raise instead of being
+        reported as a submission error.
         """
-        Evaluate submission CSV content against ground truth.
+        labels_dir = DATA_DIR / self.task_name / "test_with_labels"
+        if not labels_dir.exists():
+            raise FileNotFoundError(f"Ground truth not found at {labels_dir}")
+        labels_ds = load_from_disk(str(labels_dir))
+
+        missing = [c for c in self._ground_truth_columns() if c not in labels_ds.column_names]
+        if missing:
+            raise GroundTruthError(f"Ground truth for {self.task_name} lacks column(s) {missing}")
+        try:
+            return self._extract_labels(labels_ds)
+        except Exception as e:
+            # The message names the exception type only, so no label values
+            # reach the agent.
+            raise GroundTruthError(
+                f"Ground truth for {self.task_name} could not be read ({type(e).__name__})"
+            ) from e
+
+    def _extract_labels(self, labels_ds) -> Any:
+        metric = self.config.metric
+        col = self.config.scoring_column
+        if metric == "Accuracy":
+            return list(labels_ds[col])
+        if metric in ("FinQAAccuracy", "SpearmanCorrelation"):
+            return np.array(labels_ds[col])
+        if metric == "MAE":
+            return np.asarray(labels_ds[col], dtype=float) * self.config.label_scale
+        if metric == "DuoRCAccuracy":
+            return list(labels_ds["answers"]), list(labels_ds["no_answer"])
+        if metric == "ExactMatch":
+            # Labels are lists of acceptable answer texts
+            return [x["text"] for x in labels_ds["answers"]]
+        if metric == "Rouge1":
+            # ELI5 labels: first answer text
+            return [x["text"][0] if x["text"] else "" for x in labels_ds["answers"]]
+        if metric == "MRR":
+            # Queries are the joined docstring tokens, as in the agent's test queries.
+            return {
+                "query": [" ".join(tokens) for tokens in labels_ds["docstring_tokens"]],
+                "id": list(labels_ds["id"]),
+            }
+        if metric == "MASE":
+            # Predictions are full sequences (history + forecast); the history
+            # is each test series without its last forecast_horizon steps.
+            horizon = self.config.forecast_horizon
+            full = [np.asarray(t, dtype=float) for t in labels_ds["target"]]
+            return full, [t[:-horizon] for t in full]
+        if metric == "TimeSeriesMAE":
+            return self._forecast_labels(labels_ds)
+        if metric == "Pass@5":
+            return len(labels_ds)
+        raise ValueError(f"Unknown metric: {metric}")
+
+    def _forecast_labels(self, labels_ds) -> list[np.ndarray]:
+        """One label per forecast series: its last forecast_horizon steps.
+
+        A multivariate row (target is a list of series) contributes each target
+        series followed by each feat_dynamic_real series, matching the order of
+        the agent's test split, where every one of them is forecast.
+        """
+        horizon = self.config.forecast_horizon
+        labels = []
+        for target, dynamic in zip(labels_ds["target"], labels_ds["feat_dynamic_real"]):
+            if target and isinstance(target[0], list):
+                series = list(target) + list(dynamic or [])
+            else:
+                series = [target]
+            labels.extend(np.asarray(s, dtype=float)[-horizon:] for s in series)
+        return labels
+
+    def _evaluate_submission(self, csv_content: str, labels: Any) -> float:
+        """
+        Evaluate submission CSV content against the labels from _load_labels.
         Returns the raw metric score.
         """
         metric = self.config.metric
-        task_name = self.task_name
-
-        # Load ground truth
-        labels_dir = DATA_DIR / task_name / "test_with_labels"
-        if not labels_dir.exists():
-            raise FileNotFoundError(f"Ground truth not found at {labels_dir}")
-
-        labels_ds = load_from_disk(str(labels_dir))
 
         # Parse submission CSV
         submission_df = pd.read_csv(io.StringIO(csv_content), header=0)
 
         # Dispatch to appropriate metric
         if metric == "DuoRCAccuracy":
-            return self._eval_duorc(submission_df, labels_ds)
-        elif metric == "FinQAAccuracy":
-            return self._eval_finqa(submission_df, labels_ds)
-        elif metric == "Accuracy":
-            return self._eval_accuracy(submission_df, labels_ds)
-        elif metric == "ExactMatch":
-            return self._eval_exact_match(submission_df, labels_ds)
-        elif metric == "MAE":
-            return self._eval_mae(submission_df, labels_ds)
-        elif metric == "Rouge1":
-            return self._eval_rouge1(submission_df, labels_ds)
-        elif metric == "SpearmanCorrelation":
-            return self._eval_spearman(submission_df, labels_ds)
-        elif metric == "MRR":
-            return self._eval_mrr(submission_df, labels_ds)
-        elif metric == "MASE":
-            return self._eval_mase(submission_df, labels_ds)
-        elif metric == "TimeSeriesMAE":
-            return self._eval_time_series_mae(submission_df, labels_ds)
-        else:
-            raise ValueError(f"Unknown metric: {metric}")
+            label_answers, label_no_answers = labels
+            return duorc_accuracy(
+                list(submission_df["answer"]), list(submission_df["has_answer"]),
+                label_answers, label_no_answers,
+            )
+        if metric == "MRR":
+            return mrr(submission_df, labels)
 
-    def _eval_accuracy(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate integer accuracy."""
-        preds = submission_df.values.squeeze()
-        scoring_col = self.config.scoring_column
-        labels = list(labels_ds[scoring_col])
+        # atleast_1d keeps a one-row submission a sequence rather than a scalar.
+        preds = np.atleast_1d(submission_df.values.squeeze())
+        if metric == "MASE":
+            label_targets, train_targets = labels
+            return mase(preds, label_targets, train_targets)
+        if metric == "TimeSeriesMAE":
+            return time_series_mae(preds, labels)
+
         if len(preds) != len(labels):
             raise ValueError(
                 f"Row count mismatch: {len(preds)} predictions vs {len(labels)} labels"
             )
-        return accuracy_int(preds, labels)
+        if metric == "Accuracy":
+            return accuracy_int(preds, labels)
+        if metric == "FinQAAccuracy":
+            return finqa_accuracy(preds, labels)
+        if metric == "ExactMatch":
+            return exact_match(preds, labels)
+        if metric == "MAE":
+            return mae(preds, labels)
+        if metric == "Rouge1":
+            return rouge1(preds, labels)
+        if metric == "SpearmanCorrelation":
+            return spearman_correlation(preds, labels)
+        raise ValueError(f"Unknown metric: {metric}")
 
-    def _eval_finqa(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate FinQA accuracy with numeric tolerance."""
-        preds = submission_df.values.squeeze()
-        scoring_col = self.config.scoring_column
-        labels = np.array(labels_ds[scoring_col])
-        if len(preds) != len(labels):
-            raise ValueError(
-                f"Row count mismatch: {len(preds)} predictions vs {len(labels)} labels"
-            )
-        return finqa_accuracy(preds, labels)
-
-    def _eval_duorc(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate DuoRC accuracy with answer/has_answer columns."""
-        sub_answers = list(submission_df["answer"])
-        sub_has_answers = list(submission_df["has_answer"])
-        label_answers = list(labels_ds["answers"])
-        label_no_answers = list(labels_ds["no_answer"])
-        return duorc_accuracy(sub_answers, sub_has_answers, label_answers, label_no_answers)
-
-    def _eval_exact_match(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate SQuAD-style exact match."""
-        preds = submission_df.values.squeeze()
-        # Labels are lists of acceptable answer texts
-        labels = [x["text"] for x in labels_ds["answers"]]
-        if len(preds) != len(labels):
-            raise ValueError(
-                f"Row count mismatch: {len(preds)} predictions vs {len(labels)} labels"
-            )
-        return exact_match(preds, labels)
-
-    def _eval_mae(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate Mean Absolute Error."""
-        preds = submission_df.values.squeeze()
-        scoring_col = self.config.scoring_column
-        labels = np.array(labels_ds[scoring_col])
-        if len(preds) != len(labels):
-            raise ValueError(
-                f"Row count mismatch: {len(preds)} predictions vs {len(labels)} labels"
-            )
-        return mae(preds, labels)
-
-    def _eval_rouge1(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate ROUGE-1 F-measure."""
-        preds = submission_df.values.squeeze()
-        # ELI5 labels: first answer text
-        labels = [
-            x["text"][0] if x["text"] else ""
-            for x in labels_ds["answers"]
-        ]
-        if len(preds) != len(labels):
-            raise ValueError(
-                f"Row count mismatch: {len(preds)} predictions vs {len(labels)} labels"
-            )
-        return rouge1(preds, labels)
-
-    def _eval_spearman(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate Spearman correlation."""
-        preds = submission_df.values.squeeze()
-        scoring_col = self.config.scoring_column
-        labels = np.array(labels_ds[scoring_col])
-        if len(preds) != len(labels):
-            raise ValueError(
-                f"Row count mismatch: {len(preds)} predictions vs {len(labels)} labels"
-            )
-        return spearman_correlation(preds, labels)
-
-    def _eval_mrr(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate Mean Reciprocal Rank."""
-        return mrr(submission_df, labels_ds)
-
-    def _eval_mase(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate MASE for time series forecasting."""
-        preds = submission_df.values.squeeze()
-        label_targets = labels_ds["label_target"]
-        train_targets = labels_ds["target"]
-        return mase(preds, label_targets, train_targets)
-
-    def _eval_time_series_mae(self, submission_df: pd.DataFrame, labels_ds) -> float:
-        """Evaluate MAE for time series forecasting (Rideshare, Solar)."""
-        preds = submission_df.values.squeeze()
-        label_targets = labels_ds["label_target"]
-        train_targets = labels_ds["target"]
-        return time_series_mae(preds, label_targets, train_targets)
-
-    def _check_pass_at_5_submission(self, csv_content: str) -> None:
+    def _check_pass_at_5_submission(self, csv_content: str, n_problems: int) -> None:
         """Validate the Pass@5 submission's shape before running the sandbox
         harness, so a malformed file is reported to the agent rather than
         surfacing as a harness failure."""
-        labels_dir = DATA_DIR / self.task_name / "test_with_labels"
-        if not labels_dir.exists():
-            raise FileNotFoundError(f"Ground truth not found at {labels_dir}")
-        n_problems = len(load_from_disk(str(labels_dir)))
-
         submission_df = pd.read_csv(io.StringIO(csv_content))
         missing = [c for c in PASS_AT_5_COLUMNS if c not in submission_df.columns]
         if missing:
