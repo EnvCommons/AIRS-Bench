@@ -427,8 +427,11 @@ class FakeSandbox:
             if truncated:
                 output = output[:max_bytes]
             return RunResult(output, 0, truncated=truncated)
-        if m := re.fullmatch(r"printf '%s' '([A-Za-z0-9+/=]*)' \| base64 -d > (\S+)", cmd):
-            self.files[m.group(2)] = base64.b64decode(m.group(1))
+        if m := re.fullmatch(r"printf '%s' '([A-Za-z0-9+/=]*)' \| base64 -d (>>?) (\S+)", cmd):
+            data = base64.b64decode(m.group(1))
+            if m.group(2) == ">>":
+                data = self.files.get(m.group(3), b"") + data
+            self.files[m.group(3)] = data
             return RunResult("", 0)
         if cmd.startswith("mkdir -p "):
             return RunResult("", 0)
@@ -749,24 +752,340 @@ class TestDeployedGroundTruth:
         assert ids == [n for n in TASK_NAMES if n != KAGGLE]
 
 
-class TestR2AbsNormalisation:
-    """The worst score for R_2_Abs is the MAE of predicting the train mean, so
-    a trivial model scores 0 and a good model's score still varies with its MAE."""
+# --- trivial-model baselines ---
+
+CV = "CvMolecularPropertyPredictionQm9MeanAbsoluteError"
+ZINC = "GraphRegressionZincMae"
+SICK_SIMILARITY = "TextualSimilaritySickSpearmanCorrelation"
+
+
+def _mae_case(task, prediction, offsets):
+    """Ground truth whose labels sit at the given offsets from a constant
+    prediction (in the units the agent submits), and that prediction's CSV."""
+    config = TASKS[task]
+    col = config.scoring_column
+    labels = [(prediction + o) / config.label_scale for o in offsets]
+    return {col: labels}, _csv(col, [prediction] * len(offsets))
+
+
+# Error of the best trivial model on each regression task's deployed ground
+# truth: a constant train-set median (QM9, ZINC; G and U_0 in meV), each series'
+# historical mean (Rideshare) or last value (Solar). check_ground_truth.py
+# computes these from the deployed data.
+TRIVIAL_MODEL_ERROR = {
+    CV: 3.210379,
+    QM9_G: 847850.08,
+    QM9_R2: 198.2839,
+    QM9_U0: 847839.11,
+    ZINC: 1.499522,
+    RIDESHARE: 1.267263,
+    SOLAR: 1729.409,
+}
+
+
+class TestTrivialBaselineNormalisation:
+    """A trivial model earns 0 on each regression task, a correct submission 1,
+    and a model in between is rewarded by how much of the trivial model's error
+    it removes."""
+
+    MAE_TASKS = [CV, QM9_G, QM9_R2, QM9_U0, ZINC]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("offset,expected", [
-        (201.874, 0.0),
-        (3.0, 1 - 3.0 / 201.874),
-        (0.0, 1.0),
+    @pytest.mark.parametrize("task_name", MAE_TASKS)
+    @pytest.mark.parametrize("fraction,expected", [(1.0, 0.0), (0.25, 0.75), (0.0, 1.0)])
+    async def test_mae_reward(self, monkeypatch, tmp_path, task_name, fraction, expected):
+        # A prediction whose MAE is `fraction` of the trivial model's.
+        error = fraction * TRIVIAL_MODEL_ERROR[task_name]
+        gt, csv = _mae_case(task_name, 1000.0, [error, -error])
+        env = _make_env(monkeypatch, tmp_path, task_name, labels=gt, files={SUBMISSION: csv})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True, result.blocks[0].text
+        assert result.reward == pytest.approx(expected, abs=1e-6)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task_name", [SOLAR, RIDESHARE])
+    @pytest.mark.parametrize("fraction,expected", [(1.0, 0.0), (0.25, 0.75), (0.0, 1.0)])
+    async def test_forecast_reward(self, monkeypatch, tmp_path, task_name, fraction, expected):
+        horizon = TASKS[task_name].forecast_horizon
+        error = fraction * TRIVIAL_MODEL_ERROR[task_name]
+        history = _series(10)
+        target = history + [9.0 + error] * horizon
+        if task_name == RIDESHARE:
+            gt = {"target": [[target]], "feat_dynamic_real": [[]]}
+        else:
+            gt = {"target": [target], "feat_dynamic_real": [None]}
+        csv = _json_rows("label_target", [[9.0] * horizon])
+        env = _make_env(monkeypatch, tmp_path, task_name, labels=gt, files={SUBMISSION: csv})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True, result.blocks[0].text
+        assert result.reward == pytest.approx(expected, abs=1e-6)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("predictions,expected", [
+        ([3.0, 3.0, 3.0, 3.0], 0.0),  # constant: no ranking information
+        ([1.0, 2.0, 4.0, 3.0], 0.8),  # Spearman 0.8
+        ([1.0, 2.0, 3.0, 4.0], 1.0),
     ])
-    async def test_reward_for_mae(self, monkeypatch, tmp_path, offset, expected):
-        labels = [1000.0, 1200.0, 1400.0]
+    async def test_spearman_reward(self, monkeypatch, tmp_path, predictions, expected):
         env = _make_env(
-            monkeypatch, tmp_path, QM9_R2,
-            labels={"R_2_Abs": labels},
-            files={SUBMISSION: _csv("R_2_Abs", [v + offset for v in labels])},
+            monkeypatch, tmp_path, SICK_SIMILARITY,
+            labels={"relatedness_score": [1.5, 2.5, 3.5, 4.5]},
+            files={SUBMISSION: _csv("relatedness_score", predictions)},
         )
         from airs_bench import SubmitParams
         result = await env.submit(SubmitParams())
-        assert result.metadata["raw_score"] == pytest.approx(offset)
+        assert result.finished is True, result.blocks[0].text
         assert result.reward == pytest.approx(expected, abs=1e-6)
+
+
+class TestNonFinitePredictions:
+    """NaN predictions are reported back ungraded rather than scored: a NaN
+    score would otherwise clamp to reward 1.0, and skipped NaN forecast steps
+    would let a submission choose which steps count."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("values", [["nan"] * 3, [1.0, "nan", 2.0], [1.0, "inf", 2.0]])
+    async def test_mae_nan_prediction_is_not_graded(self, monkeypatch, tmp_path, values):
+        env = _make_env(
+            monkeypatch, tmp_path, CV,
+            labels={"c_v": [30.0, 31.0, 32.0]},
+            files={SUBMISSION: _csv("c_v", values)},
+        )
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert result.metadata["graded"] is False
+        assert "finite" in result.blocks[0].text
+        assert env.submitted is False
+
+    @pytest.mark.asyncio
+    async def test_forecast_nan_steps_are_not_graded(self, monkeypatch, tmp_path):
+        gt = {"target": [_series(10)], "feat_dynamic_real": [None]}
+        csv = b'label_target\n"[NaN, NaN, NaN, NaN, 9.0]"\n'
+        env = _make_env(monkeypatch, tmp_path, SOLAR, labels=gt, files={SUBMISSION: csv})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert result.metadata["graded"] is False
+        assert "finite" in result.blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_nan_score_is_not_rewarded(self, monkeypatch, tmp_path):
+        # Any metric path that still yields NaN is reported, never clamped to 1.0.
+        env = _make_env(
+            monkeypatch, tmp_path, CV,
+            labels={"c_v": [30.0, 31.0]},
+            files={SUBMISSION: _csv("c_v", [30.0, 31.0])},
+        )
+        monkeypatch.setattr(env, "_evaluate_submission", lambda csv, labels: float("nan"))
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert result.reward == 0.0
+
+
+# --- Pass@5 grading sandbox ---
+
+import io
+import json
+
+
+class FakeGradingSandbox(FakeSandbox):
+    """Fake of a fresh grading sandbox. Like the SDK handle it must be started
+    before use and can't be restarted once stopped. Running the harness needs
+    every harness file and the submission to have been uploaded; it then grades
+    its shard of the problems, counting a problem solved when any of its
+    programs is "ok"."""
+
+    HARNESS = ["pyext.py", "testing_util.py", "utils.py", "run_eval.py", "submission.csv"]
+
+    def __init__(self, settings, eval_code=0):
+        super().__init__()
+        self.settings = settings
+        self.eval_code = eval_code
+        self.state = "new"
+
+    async def start(self):
+        if self.state != "new":
+            raise RuntimeError("sandbox handle can't be restarted")
+        self.state = "running"
+
+    async def stop(self):
+        self.state = "stopped"
+
+    async def run(self, cmd, timeout=300, max_bytes=50_000, sanitise=True):
+        if self.state != "running":
+            raise RuntimeError("Sandbox not started")
+        pattern = r"cd /tmp/eval && python run_eval.py (\S+) (\d+) (\d+) (\d+) 2>/tmp/eval/eval.log"
+        if m := re.fullmatch(pattern, cmd):
+            self.commands.append(cmd)
+            missing = [f for f in self.HARNESS if f"/tmp/eval/{f}" not in self.files]
+            assert not missing, missing
+            assert m.group(1) == self.settings.bucket_config.mount_path
+            assert timeout is not None and timeout > int(m.group(4))
+            if self.eval_code:
+                return RunResult("", self.eval_code)
+            shard, n_shards = int(m.group(2)), int(m.group(3))
+            rows = pd.read_csv(io.BytesIO(self.files["/tmp/eval/submission.csv"])).values.tolist()
+            mine = rows[shard::n_shards]
+            result = {"correct": sum("ok" in r for r in mine), "problems": len(mine), "skipped_programs": 0}
+            return RunResult("program output\n" + json.dumps(result) + "\n", 0)
+        if cmd == "tail -50 /tmp/eval/eval.log":
+            self.commands.append(cmd)
+            return RunResult("Traceback ...", 0)
+        return await super().run(cmd, timeout, max_bytes, sanitise)
+
+
+# Ten problems; 4 of them have an "ok" program.
+PASS_AT_5_CSV = _csv(
+    "code1,code2,code3,code4,code5",
+    ["a,b,c,d,ok", "a,a,a,a,a", "ok,b,c,d,e", "a,b,c,d,e", "a,b,ok,ok,e",
+     "a,b,c,d,e", "a,b,c,d,e", "a,b,c,d,e", "a,b,c,d,ok", "a,b,c,d,e"],
+)
+
+
+def _apps_env(monkeypatch, tmp_path, **grader_kwargs):
+    env = _make_env(
+        monkeypatch, tmp_path, APPS,
+        labels={"input_output": ["{}"] * 10},
+        files={SUBMISSION: PASS_AT_5_CSV},
+    )
+    graders = []
+
+    def make_grader():
+        graders.append(FakeGradingSandbox(_grading_settings(env), **grader_kwargs))
+        return graders[-1]
+
+    monkeypatch.setattr(env, "_pass_at_5_grading_sandbox", make_grader)
+    return env, graders
+
+
+def _grading_settings(env):
+    """The SandboxSettings the env asks for when it creates a grading sandbox."""
+    captured = []
+
+    class Capture:
+        def sandbox(self, settings):
+            captured.append(settings)
+            return None
+
+    real = env.or_client
+    env.or_client = Capture()
+    try:
+        type(env)._pass_at_5_grading_sandbox(env)
+    finally:
+        env.or_client = real
+    return captured[0]
+
+
+class TestPassAt5Grading:
+    def test_agent_sandbox_mounts_only_agent_data(self, monkeypatch, tmp_path):
+        env = _make_env(monkeypatch, tmp_path, APPS)
+        assert env.sandbox_settings.bucket_config.only_dir == f"sandbox_data/{APPS}/data"
+
+    def test_grading_sandbox_mounts_ground_truth_offline(self, monkeypatch, tmp_path):
+        env = _make_env(monkeypatch, tmp_path, APPS)
+        settings = _grading_settings(env)
+        assert settings.bucket_config.only_dir == f"server_data/{APPS}/test_with_labels"
+        assert not settings.bucket_config.mount_path.startswith("/home/ubuntu/data")
+        assert settings.block_network is True
+
+    def test_runner_reads_nothing_from_the_agent_mount(self):
+        import airs_bench
+        assert "/home/ubuntu/data" not in airs_bench._PASS_AT_5_RUNNER_SCRIPT
+
+    def test_harness_is_shipped_with_the_env(self):
+        import airs_bench
+        for name in ("testing_util.py", "utils.py"):
+            assert (airs_bench.APPS_EVAL_DIR / name).is_file()
+        dockerfile = (airs_bench.APPS_EVAL_DIR.parent / "Dockerfile").read_text()
+        assert "apps_eval" in dockerfile
+
+    @pytest.mark.asyncio
+    async def test_eval_runs_in_grading_sandboxes(self, monkeypatch, tmp_path):
+        import airs_bench
+        env, graders = _apps_env(monkeypatch, tmp_path)
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True
+        assert result.reward == pytest.approx(0.4)
+        assert len(graders) == airs_bench.PASS_AT_5_GRADING_SHARDS
+        assert all(g.state == "stopped" for g in graders)
+        assert all(g.files["/tmp/eval/submission.csv"] == PASS_AT_5_CSV for g in graders)
+        shards = sorted(re.search(r"run_eval.py \S+ (\d+) ", g.commands[-1]).group(1) for g in graders)
+        assert shards == [str(k) for k in range(len(graders))]
+        # Nothing but reading the submission touches the agent's sandbox.
+        assert env.sandbox.commands == [f"test -f {SUBMISSION}"]
+
+    @pytest.mark.asyncio
+    async def test_failed_eval_retries_on_fresh_sandboxes_then_raises(self, monkeypatch, tmp_path):
+        import airs_bench
+        env, graders = _apps_env(monkeypatch, tmp_path, eval_code=1)
+        from airs_bench import SubmitParams
+        with pytest.raises(RuntimeError, match=r"Pass@5 evaluation failed \(exit 1\)"):
+            await env.submit(SubmitParams())
+        assert len(graders) == 4 * airs_bench.PASS_AT_5_GRADING_SHARDS
+        assert all(g.state == "stopped" for g in graders)
+        assert env.submitted is False
+
+    @pytest.mark.asyncio
+    async def test_runner_dedupes_and_respects_budget(self, tmp_path):
+        """Run the real runner script against a stub harness: identical
+        programs run once, and once the time budget is spent no program runs."""
+        import subprocess
+        import sys
+        import airs_bench
+        from datasets import Dataset
+
+        eval_dir = tmp_path / "eval"
+        eval_dir.mkdir()
+        (eval_dir / "utils.py").write_text(
+            "import json\n"
+            "def solves_testcases(submission, testcases, verbose=False):\n"
+            f"    with open({str(eval_dir / 'runs.log')!r}, 'a') as f:\n"
+            "        f.write(submission + '\\n')\n"
+            "    return submission == 'ok'\n"
+            "def evaluate_all_testcases(subs, tests, verbose=False, max_workers=None):\n"
+            "    return sum(any(solves_testcases(s, t) for s in row) for row, t in zip(subs, tests)) / len(subs)\n"
+        )
+        Dataset.from_dict({"input_output": ["{}"] * 4}).save_to_disk(str(tmp_path / "gt"))
+        script = airs_bench._PASS_AT_5_RUNNER_SCRIPT.replace("/tmp/eval", str(eval_dir))
+        (eval_dir / "run_eval.py").write_text(script)
+        (eval_dir / "submission.csv").write_bytes(_csv(
+            "code1,code2,code3,code4,code5",
+            ["a,a,a,a,ok", "b,b,b,b,b", "ok,ok,ok,ok,ok", "c,d,c,d,c"],
+        ))
+
+        def run(shard, n_shards, budget):
+            (eval_dir / "runs.log").unlink(missing_ok=True)
+            out = subprocess.run(
+                [sys.executable, "run_eval.py", str(tmp_path / "gt"), str(shard), str(n_shards), str(budget)],
+                cwd=eval_dir, capture_output=True, text=True,
+            )
+            assert out.returncode == 0, out.stderr
+            out = out.stdout
+            log = eval_dir / "runs.log"
+            return json.loads(out.strip().splitlines()[-1]), log.read_text().split() if log.exists() else []
+
+        result, runs = run(0, 1, 3600)
+        assert result == {"correct": 2, "problems": 4, "skipped_programs": 0}
+        assert runs == ["a", "ok", "b", "ok", "c", "d"]
+        result, runs = run(1, 2, 3600)
+        assert result == {"correct": 0, "problems": 2, "skipped_programs": 0}
+        assert runs == ["b", "c", "d"]
+        result, runs = run(0, 1, 0)
+        assert result == {"correct": 0, "problems": 4, "skipped_programs": 6}
+        assert runs == []
+
+    @pytest.mark.asyncio
+    async def test_large_upload_is_chunked(self, monkeypatch, tmp_path):
+        import airs_bench
+        env = _make_env(monkeypatch, tmp_path, APPS)
+        content = "".join(chr(32 + i % 90) for i in range(3 * airs_bench.UPLOAD_CHUNK_BYTES + 7))
+        await env._upload_file_to_sandbox(content, "/tmp/eval/big.csv")
+        assert env.sandbox.files["/tmp/eval/big.csv"] == content.encode()
+        uploads = [c for c in env.sandbox.commands if "base64 -d" in c]
+        assert len(uploads) == 4
+        assert max(len(c) for c in uploads) < 1_100_000

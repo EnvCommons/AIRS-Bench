@@ -49,11 +49,19 @@ Each agent sandbox runs with 1 CPU and 2GB RAM. Network access is enabled for pa
 
 TimeSeriesForecastingKaggleWebTrafficMASE is not served: a submission is 145,063 full-length series (about 1 GB of CSV), too large to grade in the environment server. `list_tasks` returns the other 19.
 
-`check_ground_truth.py` checks each task's ground truth against its grader: the columns it reads exist, a submission reproducing the labels scores the optimum, and the agent's test split has one row per label.
+`check_ground_truth.py` checks each task's ground truth against its grader: the columns it reads exist, a submission reproducing the labels scores the optimum, the agent's test split has one row per label, and each regression task's worst score is the score of its best trivial model.
 
 ## Reward Structure
 
-Raw metric values are returned as rewards. Metadata includes `lower_is_better` and `metric` fields so the platform can interpret the score correctly. Accuracy-type metrics range 0-1 (higher is better); MAE/MASE metrics are unbounded (lower is better).
+The raw metric is normalised to a reward in [0, 1]: `(worst - raw) / (worst - optimal)`, clipped, where `optimal` is the metric's best value and `worst` is the task's `estimated_worst_score`. For the regression tasks `worst` is the score of the best trivial model, so a trivial model earns 0:
+
+- QM9 (c_v, G, R_2_Abs, U_0) and ZINC (MAE): a constant prediction of the train-set median, the constant that minimises absolute error.
+- Rideshare and Solar (MAE): the stronger of the naive forecast (each series' last observed value) and each series' historical mean.
+- SICK relatedness (Spearman): 0, the correlation of a constant prediction.
+
+Predictions must be finite: a submission with NaN or infinite predictions is not graded and can be fixed and resubmitted. The raw metric, the reward, `metric` and `lower_is_better` are returned in the metadata.
+
+Pass@5 (APPS) runs the submitted programs against the hidden test cases in a separate, network-blocked grading sandbox that mounts the task's ground truth; the agent's sandbox never holds the hidden tests.
 
 ## Data
 

@@ -218,7 +218,8 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["relatedness_score"],
         custom_gold_labels=False,
         sota_score=0.900,
-        estimated_worst_score=-0.5870786,
+        # A constant (trivial) prediction has no rank correlation with the labels.
+        estimated_worst_score=0.0,
         optimal_score=1.0,
         submission_columns=["relatedness_score"],
     ),
@@ -272,7 +273,9 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["c_v"],
         custom_gold_labels=False,
         sota_score=0.012,
-        estimated_worst_score=132.63319396972656,
+        # Test-set MAE of predicting the train-set median of c_v for every
+        # molecule (check_ground_truth.py recomputes it).
+        estimated_worst_score=3.210379,
         optimal_score=0.0,
         submission_columns=["c_v"],
     ),
@@ -290,7 +293,8 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["G"],
         custom_gold_labels=True,
         sota_score=0.008,
-        estimated_worst_score=11185110,
+        # Test-set MAE (meV) of predicting the train-set median of G.
+        estimated_worst_score=847850.08,
         optimal_score=0.0,
         submission_columns=["G"],
         # Train labels and the task description are in meV; the source test split is in eV.
@@ -310,9 +314,9 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["R_2_Abs"],
         custom_gold_labels=False,
         sota_score=0.010,
-        # Test-set MAE of predicting the train-set mean of R_2_Abs (1189.97)
-        # for every molecule, so a trivial model scores 0 rather than ~0.97.
-        estimated_worst_score=201.874,
+        # Test-set MAE of predicting the train-set median of R_2_Abs for every
+        # molecule, so a trivial model scores 0.
+        estimated_worst_score=198.2839,
         optimal_score=0.0,
         submission_columns=["R_2_Abs"],
     ),
@@ -330,7 +334,8 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["U_0"],
         custom_gold_labels=True,
         sota_score=0.005,
-        estimated_worst_score=24183970,
+        # Test-set MAE (meV) of predicting the train-set median of U_0.
+        estimated_worst_score=847839.11,
         optimal_score=0.0,
         submission_columns=["U_0"],
         # Train labels and the task description are in meV; the source test split is in eV.
@@ -350,7 +355,8 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["y"],
         custom_gold_labels=False,
         sota_score=0.059,
-        estimated_worst_score=9.699924,
+        # Test-set MAE of predicting the train-set median of y.
+        estimated_worst_score=1.499522,
         optimal_score=0.0,
         submission_columns=["y"],
     ),
@@ -387,7 +393,9 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=[],
         custom_gold_labels=True,
         sota_score=2.450,
-        estimated_worst_score=30.22490,
+        # MAE of forecasting each series' historical mean, the stronger of the
+        # naive (last value) and historical-mean forecasts here.
+        estimated_worst_score=1.267263,
         optimal_score=0.0,
         submission_columns=["prediction"],
         forecast_horizon=48,
@@ -406,7 +414,9 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=[],
         custom_gold_labels=True,
         sota_score=200.0,
-        estimated_worst_score=34761.99,
+        # MAE of the naive forecast (each series' last observed value), the
+        # stronger of the naive and historical-mean forecasts here.
+        estimated_worst_score=1729.409,
         optimal_score=0.0,
         submission_columns=["prediction"],
         forecast_horizon=5,

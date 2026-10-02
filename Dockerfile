@@ -11,6 +11,7 @@ COPY server.py .
 COPY airs_bench.py .
 COPY evaluate.py .
 COPY task_config.py .
+COPY apps_eval/ apps_eval/
 
 EXPOSE 8000
 

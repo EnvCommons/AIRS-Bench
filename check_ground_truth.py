@@ -7,6 +7,11 @@ fails if a column the grader reads is missing), grades a submission built from
 those labels and checks that it reaches the task's optimal score, and, when the
 agent's test split is available, checks that it has one row per label.
 
+For regression tasks it also grades trivial models built from the agent's data
+(a constant train-set mean or median; for forecasting, each series' last value
+or historical mean) and checks that the task's estimated_worst_score is the best
+of their scores, so a trivial model earns reward 0.
+
 Usage:
     python check_ground_truth.py [DATA_ROOT]
 
@@ -60,6 +65,56 @@ def gold_submission(task_name: str, labels) -> str | None:
     return df.to_csv(index=False)
 
 
+def _constant_csv(column: str, value: float, n: int) -> str:
+    return pd.DataFrame({column: [value] * n}).to_csv(index=False)
+
+
+def _agent_series(test_dir: Path) -> list[np.ndarray]:
+    """The agent's forecast inputs, one per series, in submission order."""
+    from datasets import load_from_disk
+
+    series = []
+    for target in load_from_disk(str(test_dir))["target"]:
+        rows = target if (target and isinstance(target[0], list)) else [target]
+        series.extend(np.asarray(r, dtype=float) for r in rows)
+    return series
+
+
+def trivial_submissions(task_name: str, root: Path, n_labels: int) -> dict[str, str] | None:
+    """Trivial-model submission.csv files for a regression task, by name, or
+    None for other tasks or when the agent's data isn't available."""
+    from datasets import load_from_disk
+
+    config = TASKS[task_name]
+    data_dir = root / "sandbox_data" / task_name / "data"
+    column = config.submission_columns[0]
+    if config.metric in ("MAE", "SpearmanCorrelation"):
+        if not (data_dir / "train").exists():
+            return None
+        train = load_from_disk(str(data_dir / "train"))
+        y = np.asarray(train[config.scoring_column], dtype=float).ravel()
+        return {
+            "train mean": _constant_csv(column, float(y.mean()), n_labels),
+            "train median": _constant_csv(column, float(np.median(y)), n_labels),
+        }
+    if config.metric == "TimeSeriesMAE":
+        if not (data_dir / "test").exists():
+            return None
+        horizon = config.forecast_horizon
+        forecasts = {"naive (last value)": [], "historical mean": []}
+        for history in _agent_series(data_dir / "test"):
+            observed = history[~np.isnan(history)]
+            last = float(observed[-1]) if len(observed) else 0.0
+            mean = float(observed.mean()) if len(observed) else 0.0
+            forecasts["naive (last value)"].append([last] * horizon)
+            forecasts["historical mean"].append([mean] * horizon)
+        return {
+            name: pd.DataFrame({"label_target": [json.dumps(r) for r in rows]}).to_csv(index=False)
+            for name, rows in forecasts.items()
+        }
+    return None
+
+
 def agent_row_count(test_dir: Path, metric: str) -> int | None:
     """Rows (or forecast series) the agent predicts for its test split."""
     from datasets import load_from_disk
@@ -104,6 +159,18 @@ def check_task(task_name: str, root: Path) -> list[str]:
         n_labels = len(labels)
     if n_agent is not None and n_agent != n_labels:
         problems.append(f"agent test split has {n_agent} rows, ground truth has {n_labels} labels")
+
+    trivial = trivial_submissions(task_name, root, n_labels)
+    if trivial:
+        scores = {name: env._evaluate_submission(sub, labels) for name, sub in trivial.items()}
+        for name, value in scores.items():
+            print(f"    trivial model, {name}: {config.metric} {value:.6f}")
+        best = min(scores.values()) if config.lower_is_better else max(scores.values())
+        if not math.isclose(config.estimated_worst_score, best, rel_tol=1e-5, abs_tol=1e-9):
+            problems.append(
+                f"estimated_worst_score is {config.estimated_worst_score}, "
+                f"the best trivial model scores {best:.7g}"
+            )
     return problems
 
 
