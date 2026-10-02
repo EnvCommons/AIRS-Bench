@@ -176,6 +176,8 @@ def mae(predictions, labels) -> float:
 
     y_true = np.asarray(labels, dtype=float)
     y_pred = np.asarray(clean_preds, dtype=float)
+    if not np.all(np.isfinite(y_pred)):
+        raise ValueError("Predictions must be finite numbers (found NaN or inf)")
 
     # Squeeze trailing singleton dims
     if y_pred.ndim > 1 and y_pred.shape[1] == 1:
@@ -219,9 +221,16 @@ def spearman_correlation(predictions, labels) -> float:
     """
     Spearman rank correlation coefficient.
     Used for SICK Textual Similarity.
+
+    Constant predictions carry no ranking information, so they score 0 (the
+    correlation is otherwise undefined).
     """
     preds = np.asarray(predictions, dtype=float)
     lbls = np.asarray(labels, dtype=float)
+    if not np.all(np.isfinite(preds)):
+        raise ValueError("Predictions must be finite numbers (found NaN or inf)")
+    if np.all(preds == preds[0]):
+        return 0.0
     return float(spearmanr(preds, lbls).correlation)
 
 
@@ -356,6 +365,10 @@ def time_series_mae(predictions, labels, train_targets=None, forecast_horizon=No
             raise ValueError(
                 f"Row {i}: prediction has shape {pred.shape}, expected {label.shape}"
             )
+        # Missing label values are skipped below; missing predictions are not,
+        # since skipping them would let a submission choose which steps count.
+        if not np.all(np.isfinite(pred)):
+            raise ValueError(f"Row {i}: predictions must be finite numbers (found NaN or inf)")
 
         all_preds.append(pred)
         all_labels.append(label)
@@ -363,8 +376,8 @@ def time_series_mae(predictions, labels, train_targets=None, forecast_horizon=No
     all_preds_flat = np.concatenate(all_preds)
     all_labels_flat = np.concatenate(all_labels)
 
-    # Remove NaN values
-    valid_mask = ~(np.isnan(all_preds_flat) | np.isnan(all_labels_flat))
+    # Skip steps whose label is missing
+    valid_mask = ~np.isnan(all_labels_flat)
     if not np.any(valid_mask):
         raise ValueError("No valid (non-NaN) data points found for evaluation")
 

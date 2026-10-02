@@ -14,6 +14,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -87,6 +88,24 @@ REPEAT_SUBMISSION_PENALTY = -0.1
 SUBMISSION_PATH = "/home/ubuntu/submission.csv"
 PASS_AT_5_COLUMNS = ["code1", "code2", "code3", "code4", "code5"]
 
+SANDBOX_IMAGE = "generalreasoning/airs-bench-sandbox:latest"
+
+# Pass@5 runs the submitted programs against the hidden test cases in separate
+# grading sandboxes, which mount the task's ground truth. The agent's sandbox
+# never holds the hidden tests, and the agent can't reach the grading sandboxes.
+# Each program run costs about a CPU-second, so the problems are split across
+# several sandboxes graded in parallel.
+APPS_EVAL_DIR = Path(__file__).parent / "apps_eval"
+PASS_AT_5_GRADING_MACHINE = "4:16"
+PASS_AT_5_GRADING_SHARDS = 4
+PASS_AT_5_GROUND_TRUTH_MOUNT = "/home/ubuntu/grading/test_with_labels"
+# Programs not started within the time budget count as failing, which bounds
+# grading time for submissions whose programs mostly time out.
+PASS_AT_5_TIME_BUDGET = 75 * 60
+PASS_AT_5_EVAL_TIMEOUT = PASS_AT_5_TIME_BUDGET + 20 * 60
+# Raw bytes per upload command; each command carries ~4/3 of this as base64.
+UPLOAD_CHUNK_BYTES = 768 * 1024
+
 # Errors raised while parsing or scoring a malformed submission.csv (wrong row
 # count, missing column, unparsable value). These are the agent's to fix, so the
 # submission is reported back ungraded instead of failing the tool call.
@@ -145,30 +164,53 @@ class RuntimeModule(types.ModuleType):
         return mod
 """
 
+# Grades one shard: problems shard, shard + n_shards, ... of the test set.
+# usage: run_eval.py GROUND_TRUTH_DIR SHARD N_SHARDS TIME_BUDGET_SECONDS
 _PASS_AT_5_RUNNER_SCRIPT = r"""
 import json
 import sys
+import time
 sys.path.insert(0, '/tmp/eval')
 
 import pandas as pd
 from datasets import load_from_disk
 
+import utils
+
+ground_truth, shard, n_shards, budget = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
+deadline = time.monotonic() + budget
+
 print("Loading APPS test dataset with labels...", file=sys.stderr)
-ds = load_from_disk('/home/ubuntu/data/test_with_labels')
+ds = load_from_disk(ground_truth)
 print(f"Loaded {len(ds)} test problems", file=sys.stderr)
 
 print("Loading submission...", file=sys.stderr)
-sub = pd.read_csv('/home/ubuntu/submission.csv')
+sub = pd.read_csv('/tmp/eval/submission.csv')
 submissions = sub[['code1', 'code2', 'code3', 'code4', 'code5']].values.tolist()
 print(f"Loaded {len(submissions)} submissions", file=sys.stderr)
 
 assert len(submissions) == len(ds), \
     f"Mismatch: {len(submissions)} submissions vs {len(ds)} test problems"
 
-print("Running Pass@5 evaluation...", file=sys.stderr)
-from utils import evaluate_all_testcases
-score = evaluate_all_testcases(submissions, ds, max_workers=4)
-print(json.dumps({"pass_at_5": float(score)}))
+indices = list(range(shard, len(ds), n_shards))
+# Identical programs give identical results, so each distinct one runs once.
+shard_submissions = [list(dict.fromkeys(submissions[i])) for i in indices]
+
+skipped = []
+run_program = utils.solves_testcases
+
+def run_within_budget(submission, testcases, verbose=False):
+    if time.monotonic() > deadline:
+        skipped.append(1)
+        return False
+    return run_program(submission, testcases, verbose)
+
+utils.solves_testcases = run_within_budget
+
+print(f"Running Pass@5 evaluation on {len(indices)} problems...", file=sys.stderr)
+score = utils.evaluate_all_testcases(shard_submissions, ds.select(indices), max_workers=8)
+print(json.dumps({"correct": round(score * len(indices)), "problems": len(indices),
+                  "skipped_programs": len(skipped)}))
 """
 
 
@@ -192,7 +234,7 @@ class AIRSBench(Environment):
 
         self.sandbox_settings = SandboxSettings(
             environment="GeneralReasoning/AIRS-Bench",
-            image="generalreasoning/airs-bench-sandbox:latest",
+            image=SANDBOX_IMAGE,
             machine_size="2:8",
             block_network=False,
             bucket_config=SandboxBucketConfig(
@@ -202,8 +244,8 @@ class AIRSBench(Environment):
             ),
         )
 
-        or_client = AsyncOpenReward(api_key=api_key)
-        self.sandbox = or_client.sandbox(self.sandbox_settings)
+        self.or_client = AsyncOpenReward(api_key=api_key)
+        self.sandbox = self.or_client.sandbox(self.sandbox_settings)
 
         # Load project description for prompt
         desc_path = DATA_DIR / self.task_name / "project_description.md"
@@ -488,6 +530,10 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
                 self._check_pass_at_5_submission(csv_content, labels)
             else:
                 raw_score = self._evaluate_submission(csv_content, labels)
+                # A NaN score would pass the [0, 1] clamp below as reward 1.0.
+                if math.isnan(raw_score):
+                    raise ValueError("the score is undefined (NaN); check the predictions "
+                                     "for NaN or missing values")
         except SUBMISSION_ERRORS as e:
             msg = f"{type(e).__name__}: {e}"
             if len(msg) > 1000:
@@ -503,7 +549,7 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
         if self.config.metric == "Pass@5":
             raw_score = await self._with_retry(
                 "pass_at_5_eval",
-                lambda: self._eval_pass_at_5_sandbox(csv_content),
+                lambda: self._eval_pass_at_5(csv_content, labels),
             )
 
         self.submitted = True
@@ -720,44 +766,81 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
                 f"Row count mismatch: {len(submission_df)} submissions vs {n_problems} test problems"
             )
 
-    async def _eval_pass_at_5_sandbox(self, csv_content: str) -> float:
+    def _pass_at_5_grading_sandbox(self):
+        """A fresh sandbox for one Pass@5 grading run, with the task's ground
+        truth (hidden test cases) mounted. Network is blocked so the submitted
+        programs run offline."""
+        return self.or_client.sandbox(SandboxSettings(
+            environment="GeneralReasoning/AIRS-Bench",
+            image=SANDBOX_IMAGE,
+            machine_size=PASS_AT_5_GRADING_MACHINE,
+            block_network=True,
+            bucket_config=SandboxBucketConfig(
+                mount_path=PASS_AT_5_GROUND_TRUTH_MOUNT,
+                read_only=True,
+                only_dir=f"server_data/{self.task_name}/test_with_labels",
+            ),
+        ))
+
+    async def _eval_pass_at_5(self, csv_content: str, n_problems: int) -> float:
         """
-        Run Pass@5 evaluation inside the sandbox.
-
-        Uploads the evaluation harness (testing_util.py, utils.py, pyext shim)
-        and a runner script to the sandbox. Test data (test_with_labels) must be
-        pre-mounted in the sandbox bucket at /home/ubuntu/data/test_with_labels/.
+        Run Pass@5 evaluation across grading sandboxes, one per shard of the
+        problems, and combine their counts. A failed shard cancels the others.
         """
-        # Create eval directory
-        await self.sandbox.run("mkdir -p /tmp/eval")
+        n_shards = max(1, min(PASS_AT_5_GRADING_SHARDS, n_problems))
+        tasks = [
+            asyncio.create_task(self._eval_pass_at_5_shard(csv_content, shard, n_shards))
+            for shard in range(n_shards)
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        correct = sum(r["correct"] for r in results)
+        problems = sum(r["problems"] for r in results)
+        skipped = sum(r["skipped_programs"] for r in results)
+        if problems != n_problems:
+            raise RuntimeError(f"Pass@5 graded {problems} problems, expected {n_problems}")
+        if skipped:
+            logger.warning("Pass@5: %d programs not run within the time budget", skipped)
+        logger.info("Pass@5: %d/%d problems solved", correct, problems)
+        return correct / problems
 
-        # Upload pyext shim (real pyext is broken on Python 3.12+)
-        await self._upload_file_to_sandbox(_PYEXT_SHIM, "/tmp/eval/pyext.py")
+    async def _eval_pass_at_5_shard(self, csv_content: str, shard: int, n_shards: int) -> dict:
+        """
+        Grade one shard of the problems in a fresh grading sandbox.
 
-        # Upload testing_util.py
-        testing_util_path = DATA_DIR / self.task_name / "testing_util.py"
-        if not testing_util_path.exists():
-            raise FileNotFoundError(f"testing_util.py not found at {testing_util_path}")
-        await self._upload_file_to_sandbox(
-            testing_util_path.read_text(), "/tmp/eval/testing_util.py"
-        )
+        Uploads the evaluation harness (testing_util.py, utils.py, pyext shim),
+        a runner script and the submission to a grading sandbox that mounts the
+        hidden test cases, runs it there and stops the sandbox.
+        """
+        grader = self._pass_at_5_grading_sandbox()
+        await grader.start()
+        try:
+            return await self._run_pass_at_5_shard(grader, csv_content, shard, n_shards)
+        finally:
+            await grader.stop()
 
-        # Upload utils.py (contains evaluate_all_testcases)
-        utils_path = DATA_DIR / self.task_name / "utils.py"
-        if not utils_path.exists():
-            raise FileNotFoundError(f"utils.py not found at {utils_path}")
-        await self._upload_file_to_sandbox(
-            utils_path.read_text(), "/tmp/eval/utils.py"
-        )
+    async def _run_pass_at_5_shard(self, grader, csv_content: str, shard: int, n_shards: int) -> dict:
+        await grader.run("mkdir -p /tmp/eval")
 
-        # Create and upload the runner script
-        runner_script = _PASS_AT_5_RUNNER_SCRIPT
-        await self._upload_file_to_sandbox(runner_script, "/tmp/eval/run_eval.py")
+        # pyext shim (real pyext is broken on Python 3.12+)
+        await self._upload_file_to_sandbox(_PYEXT_SHIM, "/tmp/eval/pyext.py", grader)
+        for name in ("testing_util.py", "utils.py"):
+            await self._upload_file_to_sandbox(
+                (APPS_EVAL_DIR / name).read_text(), f"/tmp/eval/{name}", grader
+            )
+        await self._upload_file_to_sandbox(_PASS_AT_5_RUNNER_SCRIPT, "/tmp/eval/run_eval.py", grader)
+        await self._upload_file_to_sandbox(csv_content, "/tmp/eval/submission.csv", grader)
 
-        # Run evaluation — this can take a long time (5000 problems × 5 submissions)
-        logger.info("Starting Pass@5 evaluation in sandbox...")
-        eval_result = await self.sandbox.run(
-            "cd /tmp/eval && python run_eval.py 2>/tmp/eval/eval.log"
+        logger.info("Starting Pass@5 evaluation of shard %d/%d...", shard + 1, n_shards)
+        eval_result = await grader.run(
+            f"cd /tmp/eval && python run_eval.py {PASS_AT_5_GROUND_TRUTH_MOUNT} "
+            f"{shard} {n_shards} {PASS_AT_5_TIME_BUDGET} 2>/tmp/eval/eval.log",
+            timeout=PASS_AT_5_EVAL_TIMEOUT,
         )
         eval_output, eval_code = eval_result
 
@@ -765,7 +848,7 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
             # Read error log for diagnostics
             # The log can echo hidden test cases, so it stays in the server log
             # and out of the raised message, which the agent sees.
-            error_log, log_code = await self.sandbox.run("tail -50 /tmp/eval/eval.log")
+            error_log, log_code = await grader.run("tail -50 /tmp/eval/eval.log")
             if log_code != 0:
                 error_log = "could not read error log"
             logger.error("Pass@5 evaluation failed (exit %s):\n%s", eval_code, error_log)
@@ -774,19 +857,25 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
         # Parse the JSON result from stdout
         try:
             result_data = json.loads(eval_output.strip().splitlines()[-1])
-            score = float(result_data["pass_at_5"])
-            logger.info(f"Pass@5 score: {score}")
-            return score
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
-            raise RuntimeError(
-                f"Failed to parse Pass@5 result from output: {eval_output}"
-            ) from e
+            return {key: int(result_data[key]) for key in ("correct", "problems", "skipped_programs")}
+        except (json.JSONDecodeError, KeyError, IndexError, ValueError, TypeError) as e:
+            # The output can include what the submitted programs printed, so it
+            # goes to the server log rather than the raised message.
+            logger.error("Unparsable Pass@5 runner output:\n%s", eval_output[-2000:])
+            raise RuntimeError("Failed to parse Pass@5 result from the runner output") from e
 
-    async def _upload_file_to_sandbox(self, content: str, remote_path: str) -> None:
-        """Upload a text file to the sandbox via base64 encoding."""
-        encoded = base64.b64encode(content.encode()).decode()
-        output, code = await self.sandbox.run(
-            f"printf '%s' '{encoded}' | base64 -d > {remote_path}"
-        )
-        if code != 0:
-            raise RuntimeError(f"Failed to upload {remote_path}: {output}")
+    async def _upload_file_to_sandbox(self, content: str, remote_path: str, sandbox=None) -> None:
+        """Upload a text file to a sandbox (default: the agent's) via base64,
+        in chunks so a large file never becomes one oversized command."""
+        sandbox = sandbox or self.sandbox
+        data = content.encode()
+        # Chunks are a multiple of 3 bytes, so each one base64-encodes on its own.
+        offsets = range(0, max(len(data), 1), UPLOAD_CHUNK_BYTES)
+        for i, start in enumerate(offsets):
+            encoded = base64.b64encode(data[start:start + UPLOAD_CHUNK_BYTES]).decode()
+            redirect = ">" if i == 0 else ">>"
+            output, code = await sandbox.run(
+                f"printf '%s' '{encoded}' | base64 -d {redirect} {remote_path}"
+            )
+            if code != 0:
+                raise RuntimeError(f"Failed to upload {remote_path}: {output}")
