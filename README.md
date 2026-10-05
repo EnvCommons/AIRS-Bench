@@ -55,7 +55,8 @@ TimeSeriesForecastingKaggleWebTrafficMASE is not served: a submission is 145,063
 
 The raw metric is normalised to a reward in [0, 1]: `(worst - raw) / (worst - optimal)`, clipped, where `optimal` is the metric's best value and `worst` is the task's `estimated_worst_score`. For the regression tasks `worst` is the score of the best trivial model, so a trivial model earns 0:
 
-- QM9 (c_v, G, R_2_Abs, U_0) and ZINC (MAE): a constant prediction of the train-set median, the constant that minimises absolute error.
+- QM9 G and U_0 (MAE, meV): the per-element reference model, a sum of per-element energies over each molecule's H, C, N, O and F counts, fitted on train by least squares. Total energies are almost linear in composition, so a constant is not a meaningful baseline for them; the reward measures how much of the per-element model's error a submission removes.
+- QM9 c_v and R_2_Abs, and ZINC (MAE): a constant prediction of the train-set median, the constant that minimises absolute error.
 - Rideshare and Solar (MAE): the stronger of the naive forecast (each series' last observed value) and each series' historical mean.
 - SICK relatedness (Spearman): 0, the correlation of a constant prediction.
 
@@ -86,7 +87,7 @@ Multi-turn. Agents typically need 20-100+ tool calls to explore data, write code
 
 ## Environment Difficulty
 
-Varies by task. NLP tasks with pre-trained models are easier; molecular property prediction and time series forecasting are harder. SOTA scores range from 0.059 (ZINC MAE) to 0.962 (SuperGLUE WSC Accuracy).
+Varies by task. NLP tasks with pre-trained models are easier; molecular property prediction and time series forecasting are harder. Each task's reference SOTA score, from its AIRS-Bench task metadata, is `sota_score` in `task_config.py`; the reward does not use it.
 
 ## Other Environment Requirements
 

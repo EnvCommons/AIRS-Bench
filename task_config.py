@@ -27,7 +27,8 @@ class TaskConfig:
     columns_to_remove: list[str] = field(default_factory=list)
     # For tasks with custom_gold_labels, evaluation is more complex
     custom_gold_labels: bool = False
-    # SOTA reference values
+    # SOTA reference value from the task's AIRS-Bench metadata.yaml, in the
+    # units the agent submits. Informational: the reward does not use it.
     sota_score: float | None = None
     estimated_worst_score: float = 0.0
     optimal_score: float = 1.0
@@ -73,7 +74,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Coreference Resolution",
         columns_to_remove=["answer"],
         custom_gold_labels=False,
-        sota_score=0.904,
+        sota_score=0.854,
         estimated_worst_score=0.4664562,
         optimal_score=1.0,
         submission_columns=["answer"],
@@ -109,7 +110,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Sentiment Analysis",
         columns_to_remove=["label"],
         custom_gold_labels=False,
-        sota_score=0.7280,
+        sota_score=0.778,
         estimated_worst_score=0.18208,
         optimal_score=1.0,
         submission_columns=["label"],
@@ -127,7 +128,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Textual Classification",
         columns_to_remove=["label"],
         custom_gold_labels=False,
-        sota_score=0.9370,
+        sota_score=0.905,
         estimated_worst_score=0.1451284,
         optimal_score=1.0,
         submission_columns=["label"],
@@ -145,7 +146,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Question Answering",
         columns_to_remove=["answer"],
         custom_gold_labels=False,
-        sota_score=0.680,
+        sota_score=0.7803,
         estimated_worst_score=0.0,
         optimal_score=1.0,
         submission_columns=["answer"],
@@ -163,7 +164,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Question Answering",
         columns_to_remove=["answers", "no_answer"],
         custom_gold_labels=True,
-        sota_score=0.696,
+        sota_score=0.4648,
         estimated_worst_score=0.0,
         optimal_score=1.0,
         submission_columns=["answer", "has_answer"],
@@ -181,7 +182,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Reading Comprehension",
         columns_to_remove=["answers"],
         custom_gold_labels=True,
-        sota_score=0.900,
+        sota_score=0.858,
         estimated_worst_score=0.0,
         optimal_score=1.0,
         submission_columns=["answers"],
@@ -199,7 +200,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Question Answering",
         columns_to_remove=["answers"],
         custom_gold_labels=True,
-        sota_score=0.290,
+        sota_score=0.269,
         estimated_worst_score=0.002451528,
         optimal_score=1.0,
         submission_columns=["answers"],
@@ -217,7 +218,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Textual Similarity",
         columns_to_remove=["relatedness_score"],
         custom_gold_labels=False,
-        sota_score=0.900,
+        sota_score=0.854,
         # A constant (trivial) prediction has no rank correlation with the labels.
         estimated_worst_score=0.0,
         optimal_score=1.0,
@@ -236,7 +237,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Code Retrieval",
         columns_to_remove=[],  # id is needed for both query and label
         custom_gold_labels=True,
-        sota_score=0.395,
+        sota_score=0.6113,
         estimated_worst_score=0.0,
         optimal_score=1.0,
         submission_columns=["query", "rankings"],
@@ -272,7 +273,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Molecular Property Prediction",
         columns_to_remove=["c_v"],
         custom_gold_labels=False,
-        sota_score=0.012,
+        sota_score=0.021,
         # Test-set MAE of predicting the train-set median of c_v for every
         # molecule (check_ground_truth.py recomputes it).
         estimated_worst_score=3.210379,
@@ -292,9 +293,13 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Molecular Property Prediction",
         columns_to_remove=["G"],
         custom_gold_labels=True,
-        sota_score=0.008,
-        # Test-set MAE (meV) of predicting the train-set median of G.
-        estimated_worst_score=847850.08,
+        sota_score=7.53,
+        # Test-set MAE (meV) of the per-element reference model: G fitted on
+        # train by least squares as a sum of per-element energies over the H, C,
+        # N, O and F atom counts. Total energies are almost linear in
+        # composition, so this is their trivial baseline, not a constant.
+        # check_ground_truth.py recomputes it.
+        estimated_worst_score=865.8952,
         optimal_score=0.0,
         submission_columns=["G"],
         # Train labels and the task description are in meV; the source test split is in eV.
@@ -313,7 +318,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Molecular Property Prediction",
         columns_to_remove=["R_2_Abs"],
         custom_gold_labels=False,
-        sota_score=0.010,
+        sota_score=0.033,
         # Test-set MAE of predicting the train-set median of R_2_Abs for every
         # molecule, so a trivial model scores 0.
         estimated_worst_score=198.2839,
@@ -333,9 +338,9 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Molecular Property Prediction",
         columns_to_remove=["U_0"],
         custom_gold_labels=True,
-        sota_score=0.005,
-        # Test-set MAE (meV) of predicting the train-set median of U_0.
-        estimated_worst_score=847839.11,
+        sota_score=5.83,
+        # Test-set MAE (meV) of the per-element reference model (see G above).
+        estimated_worst_score=862.9109,
         optimal_score=0.0,
         submission_columns=["U_0"],
         # Train labels and the task description are in meV; the source test split is in eV.
@@ -354,7 +359,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Graph Regression",
         columns_to_remove=["y"],
         custom_gold_labels=False,
-        sota_score=0.059,
+        sota_score=0.017,
         # Test-set MAE of predicting the train-set median of y.
         estimated_worst_score=1.499522,
         optimal_score=0.0,
@@ -373,7 +378,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Time Series Forecasting",
         columns_to_remove=[],
         custom_gold_labels=True,
-        sota_score=0.700,
+        sota_score=0.622,
         estimated_worst_score=502962963078372,
         optimal_score=0.0,
         submission_columns=["prediction"],
@@ -392,7 +397,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Time Series Forecasting",
         columns_to_remove=[],
         custom_gold_labels=True,
-        sota_score=2.450,
+        sota_score=1.185,
         # MAE of forecasting each series' historical mean, the stronger of the
         # naive (last value) and historical-mean forecasts here.
         estimated_worst_score=1.267263,
@@ -413,7 +418,7 @@ TASKS: dict[str, TaskConfig] = {
         research_problem="Time Series Forecasting",
         columns_to_remove=[],
         custom_gold_labels=True,
-        sota_score=200.0,
+        sota_score=576.35,
         # MAE of the naive forecast (each series' last observed value), the
         # stronger of the naive and historical-mean forecasts here.
         estimated_worst_score=1729.409,

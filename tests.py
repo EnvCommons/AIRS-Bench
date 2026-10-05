@@ -769,14 +769,15 @@ def _mae_case(task, prediction, offsets):
 
 
 # Error of the best trivial model on each regression task's deployed ground
-# truth: a constant train-set median (QM9, ZINC; G and U_0 in meV), each series'
-# historical mean (Rideshare) or last value (Solar). check_ground_truth.py
-# computes these from the deployed data.
+# truth: a constant train-set median (QM9 c_v and R_2_Abs, ZINC), the
+# per-element reference model (QM9 G and U_0, in meV), each series' historical
+# mean (Rideshare) or last value (Solar). check_ground_truth.py computes these
+# from the deployed data.
 TRIVIAL_MODEL_ERROR = {
     CV: 3.210379,
-    QM9_G: 847850.08,
+    QM9_G: 865.8952,
     QM9_R2: 198.2839,
-    QM9_U0: 847839.11,
+    QM9_U0: 862.9109,
     ZINC: 1.499522,
     RIDESHARE: 1.267263,
     SOLAR: 1729.409,
@@ -838,6 +839,79 @@ class TestTrivialBaselineNormalisation:
         result = await env.submit(SubmitParams())
         assert result.finished is True, result.blocks[0].text
         assert result.reward == pytest.approx(expected, abs=1e-6)
+
+
+class TestAtomReferenceBaseline:
+    """QM9 total energies are almost a sum of per-element energies, so their
+    trivial model is that sum fitted on train, not a constant."""
+
+    # Approximate per-element energies (meV) for H, C, N, O, F.
+    ELEMENT_ENERGY = {1: -16_400.0, 6: -1_036_000.0, 7: -1_490_000.0, 8: -2_047_000.0, 9: -2_717_000.0}
+    TRAIN = [[6, 1, 1, 1, 1], [7, 1, 1, 1], [8, 1, 1], [9, 1], [6, 6, 8, 1, 1, 1, 1, 1, 1],
+             [6, 7, 1, 1, 1, 1, 1], [6, 9, 1, 1, 1], [6, 6, 1, 1, 1, 1]]
+    TEST = [[6, 6, 6, 1, 1, 1, 1, 1, 1, 1, 1], [7, 7, 1, 1, 1, 1], [6, 8, 9, 1, 1, 1]]
+
+    def _energy(self, numbers):
+        return sum(self.ELEMENT_ENERGY[z] for z in numbers)
+
+    def test_recovers_per_element_energies(self):
+        from check_ground_truth import atom_reference_predictions
+        train_y = [self._energy(m) for m in self.TRAIN]
+        predictions = atom_reference_predictions(self.TRAIN, train_y, self.TEST)
+        assert predictions == pytest.approx([self._energy(m) for m in self.TEST], rel=1e-9)
+
+    def test_rejects_unknown_element(self):
+        from check_ground_truth import element_counts
+        with pytest.raises(ValueError):
+            element_counts([[6, 16, 1, 1]])
+
+    @pytest.mark.parametrize("task_name", [QM9_G, QM9_U0])
+    def test_targets_use_the_atom_reference(self, task_name):
+        from check_ground_truth import ATOM_REFERENCE_TARGETS
+        assert TASKS[task_name].scoring_column in ATOM_REFERENCE_TARGETS
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task_name", [QM9_G, QM9_U0])
+    async def test_atom_reference_model_earns_nothing(self, monkeypatch, tmp_path, task_name):
+        # Labels the atom reference model misses by its deployed test-set MAE.
+        error = TRIVIAL_MODEL_ERROR[task_name]
+        predictions = [self._energy(m) for m in self.TEST]
+        offsets = [error, -error, error]
+        col = TASKS[task_name].scoring_column
+        gt = {col: [(p + o) / TASKS[task_name].label_scale for p, o in zip(predictions, offsets)]}
+        env = _make_env(monkeypatch, tmp_path, task_name, labels=gt, files={SUBMISSION: _csv(col, predictions)})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True, result.blocks[0].text
+        assert result.metadata["raw_score"] == pytest.approx(error, rel=1e-6)
+        assert result.reward == pytest.approx(0.0, abs=1e-6)
+
+
+class TestSotaReference:
+    """Each task's reference SOTA is a better score than its trivial baseline,
+    so a SOTA-level submission earns a positive reward."""
+
+    @pytest.mark.parametrize("task_name", TASK_NAMES)
+    def test_sota_between_worst_and_optimal(self, task_name):
+        config = TASKS[task_name]
+        lo, hi = sorted([config.estimated_worst_score, config.optimal_score])
+        assert lo < config.sota_score < hi
+
+    @pytest.mark.asyncio
+    async def test_rideshare_reward_decreases_with_error(self, monkeypatch, tmp_path):
+        horizon = TASKS[RIDESHARE].forecast_horizon
+        rewards = []
+        for error in [0.0, TASKS[RIDESHARE].sota_score, TRIVIAL_MODEL_ERROR[RIDESHARE], 2.0]:
+            gt = {"target": [[_series(10) + [9.0 + error] * horizon]], "feat_dynamic_real": [[]]}
+            csv = _json_rows("label_target", [[9.0] * horizon])
+            env = _make_env(monkeypatch, tmp_path / str(error), RIDESHARE, labels=gt, files={SUBMISSION: csv})
+            from airs_bench import SubmitParams
+            result = await env.submit(SubmitParams())
+            assert result.finished is True, result.blocks[0].text
+            rewards.append(result.reward)
+        assert rewards[0] == pytest.approx(1.0)
+        assert 0.0 < rewards[1] < 1.0
+        assert rewards[2] == pytest.approx(0.0, abs=1e-6) and rewards[3] == 0.0
 
 
 class TestNonFinitePredictions:
