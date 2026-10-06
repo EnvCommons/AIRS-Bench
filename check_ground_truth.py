@@ -8,8 +8,9 @@ those labels and checks that it reaches the task's optimal score, and, when the
 agent's test split is available, checks that it has one row per label.
 
 For regression tasks it also grades trivial models built from the agent's data
-(a constant train-set mean or median; for forecasting, each series' last value
-or historical mean) and checks that the task's estimated_worst_score is the best
+(a constant train-set mean or median; for QM9 total energies, a per-element
+reference model; for forecasting, each series' last value or historical mean)
+and checks that the task's estimated_worst_score is the best
 of their scores, so a trivial model earns reward 0.
 
 Usage:
@@ -31,6 +32,12 @@ import pandas as pd
 
 import airs_bench
 from task_config import TASK_NAMES, TASKS
+
+# QM9 total energies: their trivial model is a sum of per-element reference
+# energies over the molecule's atom counts (the atom reference QM9 models
+# subtract), since a constant misses the near-linear dependence on composition.
+ATOM_REFERENCE_TARGETS = {"U_0", "U", "H", "G"}
+QM9_ELEMENTS = (1, 6, 7, 8, 9)
 
 
 def gold_submission(task_name: str, labels) -> str | None:
@@ -80,6 +87,24 @@ def _agent_series(test_dir: Path) -> list[np.ndarray]:
     return series
 
 
+def element_counts(atomic_numbers) -> np.ndarray:
+    """Per-molecule counts of each QM9 element (H, C, N, O, F), one row per molecule."""
+    counts = np.zeros((len(atomic_numbers), len(QM9_ELEMENTS)))
+    for i, numbers in enumerate(atomic_numbers):
+        for j, z in enumerate(QM9_ELEMENTS):
+            counts[i, j] = sum(1 for n in numbers if n == z)
+        if counts[i].sum() != len(numbers):
+            raise ValueError(f"molecule {i} has an element outside {QM9_ELEMENTS}")
+    return counts
+
+
+def atom_reference_predictions(train_numbers, train_y, test_numbers) -> np.ndarray:
+    """Predict each test molecule as a sum of per-element reference energies,
+    fitted on train by least squares (no intercept)."""
+    weights, *_ = np.linalg.lstsq(element_counts(train_numbers), np.asarray(train_y, dtype=float), rcond=None)
+    return element_counts(test_numbers) @ weights
+
+
 def trivial_submissions(task_name: str, root: Path, n_labels: int) -> dict[str, str] | None:
     """Trivial-model submission.csv files for a regression task, by name, or
     None for other tasks or when the agent's data isn't available."""
@@ -93,10 +118,15 @@ def trivial_submissions(task_name: str, root: Path, n_labels: int) -> dict[str, 
             return None
         train = load_from_disk(str(data_dir / "train"))
         y = np.asarray(train[config.scoring_column], dtype=float).ravel()
-        return {
+        trivial = {
             "train mean": _constant_csv(column, float(y.mean()), n_labels),
             "train median": _constant_csv(column, float(np.median(y)), n_labels),
         }
+        if config.scoring_column in ATOM_REFERENCE_TARGETS:
+            test = load_from_disk(str(data_dir / "test"))
+            predictions = atom_reference_predictions(train["atomic_numbers"], y, test["atomic_numbers"])
+            trivial["per-element reference"] = pd.DataFrame({column: predictions}).to_csv(index=False)
+        return trivial
     if config.metric == "TimeSeriesMAE":
         if not (data_dir / "test").exists():
             return None
