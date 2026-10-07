@@ -112,6 +112,12 @@ UPLOAD_CHUNK_BYTES = 768 * 1024
 SUBMISSION_ERRORS = (ValueError, KeyError, TypeError, IndexError, SyntaxError)
 
 
+class PassAt5MemoryKill(RuntimeError):
+    """The Pass@5 runner was killed for exhausting its grading sandbox's
+    memory. Each program's memory is capped, so this is a grader fault; the
+    same submission would be killed again, so it is not retried."""
+
+
 class GroundTruthError(RuntimeError):
     """The server-side ground truth can't be read the way the task's grader
     needs. This is the environment's fault, so it is raised rather than
@@ -441,16 +447,19 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
                 finished=False,
             )
 
-    async def _with_retry(self, label: str, call, *, max_attempts: int = 4):
+    async def _with_retry(self, label: str, call, *, max_attempts: int = 4, no_retry: tuple = ()):
         """Run a flaky sandbox/grader op with exponential backoff, re-raising on
         persistent failure so the SDK turns it into ToolFailed -> a clean terminal,
         instead of swallowing a grader/sandbox failure into a fabricated reward.
-        `call` returns a fresh awaitable on each attempt.
+        `call` returns a fresh awaitable on each attempt. Exceptions in
+        `no_retry` are deterministic and re-raised at once.
         """
         last_exc: Exception | None = None
         for attempt in range(max_attempts):
             try:
                 return await call()
+            except no_retry:
+                raise
             except Exception as e:
                 last_exc = e
                 if attempt < max_attempts - 1:
@@ -550,6 +559,7 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
             raw_score = await self._with_retry(
                 "pass_at_5_eval",
                 lambda: self._eval_pass_at_5(csv_content, labels),
+                no_retry=(PassAt5MemoryKill,),
             )
 
         self.submitted = True
@@ -851,7 +861,9 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
             error_log, log_code = await grader.run("tail -50 /tmp/eval/eval.log")
             if log_code != 0:
                 error_log = "could not read error log"
-            logger.error("Pass@5 evaluation failed (exit %s):\n%s", eval_code, error_log)
+            logger.error("Pass@5 evaluation failed (exit %s):\n%s\n%s", eval_code, eval_output[-500:], error_log)
+            if eval_code == 137 and "memory usage exceeded" in eval_output:
+                raise PassAt5MemoryKill(f"Pass@5 evaluation failed (exit {eval_code})")
             raise RuntimeError(f"Pass@5 evaluation failed (exit {eval_code})")
 
         # Parse the JSON result from stdout
