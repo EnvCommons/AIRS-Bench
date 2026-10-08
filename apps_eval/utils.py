@@ -11,6 +11,19 @@ from tqdm import tqdm
 from testing_util import run_test
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Address space a program may add to what its forked process inherits. Several
+# programs run at once in one grading sandbox, and a sandbox that runs out of
+# memory kills the whole grading run. Past this cap an allocation raises
+# MemoryError inside the program, which fails that test case.
+PROGRAM_MEMORY_BYTES = 1 << 30
+
+
+def limit_program_memory(extra_bytes=PROGRAM_MEMORY_BYTES):
+    import resource
+    inherited = int(open("/proc/self/statm").read().split()[0]) * resource.getpagesize()
+    limit = inherited + extra_bytes
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
 
 def solves_testcases(submission, testcases, verbose=False):
     """
@@ -19,6 +32,7 @@ def solves_testcases(submission, testcases, verbose=False):
     timeout = 10
 
     def _temp_run(sample, generation, debug, result):
+        limit_program_memory()
         result.append(run_test(sample, test=generation, debug=debug))
 
     manager = multiprocessing.Manager()

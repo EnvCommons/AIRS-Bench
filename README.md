@@ -49,7 +49,7 @@ Each agent sandbox runs with 1 CPU and 2GB RAM. Network access is enabled for pa
 
 TimeSeriesForecastingKaggleWebTrafficMASE is not served: a submission is 145,063 full-length series (about 1 GB of CSV), too large to grade in the environment server. `list_tasks` returns the other 19.
 
-`check_ground_truth.py` checks each task's ground truth against its grader: the columns it reads exist, a submission reproducing the labels scores the optimum, the agent's test split has one row per label, and each regression task's worst score is the score of its best trivial model.
+`check_ground_truth.py` checks each task's ground truth against its grader: the columns it reads exist, a submission reproducing the labels scores the optimum, the agent's test split has one row per label, and each task's worst score is the score of its best trivial model or constant answer.
 
 ## Reward Structure
 
@@ -60,9 +60,11 @@ The raw metric is normalised to a reward in [0, 1]: `(worst - raw) / (worst - op
 - Rideshare and Solar (MAE): the stronger of the naive forecast (each series' last observed value) and each series' historical mean.
 - SICK relatedness (Spearman): 0, the correlation of a constant prediction.
 
+For the Accuracy tasks (SVAMP, Winogrande, SuperGLUE WSC, Yelp, SICK classification) `worst` is the accuracy of the best constant answer, the majority label of the ground truth, and for DuoRC it is the accuracy of answering "no answer" to every question. A constant answer earns 0.
+
 Predictions must be finite: a submission with NaN or infinite predictions is not graded and can be fixed and resubmitted. The raw metric, the reward, `metric` and `lower_is_better` are returned in the metadata.
 
-Pass@5 (APPS) runs the submitted programs against the hidden test cases in a separate, network-blocked grading sandbox that mounts the task's ground truth; the agent's sandbox never holds the hidden tests.
+Pass@5 (APPS) runs the submitted programs against the hidden test cases in a separate, network-blocked grading sandbox that mounts the task's ground truth; the agent's sandbox never holds the hidden tests. Each program may allocate up to 1 GiB; past that an allocation fails inside the program, which fails that test case.
 
 ## Data
 

@@ -9,9 +9,10 @@ agent's test split is available, checks that it has one row per label.
 
 For regression tasks it also grades trivial models built from the agent's data
 (a constant train-set mean or median; for QM9 total energies, a per-element
-reference model; for forecasting, each series' last value or historical mean)
-and checks that the task's estimated_worst_score is the best
-of their scores, so a trivial model earns reward 0.
+reference model; for forecasting, each series' last value or historical mean),
+for Accuracy tasks every constant label, and for DuoRC a constant "no answer".
+It checks that the task's estimated_worst_score is the best of their scores,
+so a trivial model or a constant answer earns reward 0.
 
 Usage:
     python check_ground_truth.py [DATA_ROOT]
@@ -105,14 +106,22 @@ def atom_reference_predictions(train_numbers, train_y, test_numbers) -> np.ndarr
     return element_counts(test_numbers) @ weights
 
 
-def trivial_submissions(task_name: str, root: Path, n_labels: int) -> dict[str, str] | None:
-    """Trivial-model submission.csv files for a regression task, by name, or
-    None for other tasks or when the agent's data isn't available."""
+def trivial_submissions(task_name: str, root: Path, labels, n_labels: int) -> dict[str, str] | None:
+    """Trivial-model submission.csv files for a task, by name, or None for
+    tasks without one or when the agent's data isn't available."""
     from datasets import load_from_disk
 
     config = TASKS[task_name]
     data_dir = root / "sandbox_data" / task_name / "data"
     column = config.submission_columns[0]
+    if config.metric == "Accuracy":
+        # Every label value the ground truth holds, so the best constant
+        # answer (the majority class) is among them.
+        return {f"constant {v}": _constant_csv(column, v, n_labels) for v in sorted({int(y) for y in labels})}
+    if config.metric == "DuoRCAccuracy":
+        return {"constant no-answer": pd.DataFrame(
+            {"answer": [""] * n_labels, "has_answer": [False] * n_labels}
+        ).to_csv(index=False)}
     if config.metric in ("MAE", "SpearmanCorrelation"):
         if not (data_dir / "train").exists():
             return None
@@ -190,10 +199,10 @@ def check_task(task_name: str, root: Path) -> list[str]:
     if n_agent is not None and n_agent != n_labels:
         problems.append(f"agent test split has {n_agent} rows, ground truth has {n_labels} labels")
 
-    trivial = trivial_submissions(task_name, root, n_labels)
+    trivial = trivial_submissions(task_name, root, labels, n_labels)
     if trivial:
         scores = {name: env._evaluate_submission(sub, labels) for name, sub in trivial.items()}
-        for name, value in scores.items():
+        for name, value in sorted(scores.items(), key=lambda kv: kv[1], reverse=not config.lower_is_better)[:5]:
             print(f"    trivial model, {name}: {config.metric} {value:.6f}")
         best = min(scores.values()) if config.lower_is_better else max(scores.values())
         if not math.isclose(config.estimated_worst_score, best, rel_tol=1e-5, abs_tol=1e-9):

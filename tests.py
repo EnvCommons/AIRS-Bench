@@ -397,6 +397,7 @@ class TestRewardNormalization:
 import asyncio
 import base64
 import re
+from pathlib import Path
 
 from openreward.api.sandboxes.types import RunResult
 
@@ -841,6 +842,69 @@ class TestTrivialBaselineNormalisation:
         assert result.reward == pytest.approx(expected, abs=1e-6)
 
 
+WSC = "CoreferenceResolutionSuperGLUEWSCAccuracy"
+WINOGRANDE = "CoreferenceResolutionWinograndeAccuracy"
+SICK_CLASSIFICATION = "TextualClassificationSickAccuracy"
+SVAMP = "MathQuestionAnsweringSVAMPAccuracy"
+DUORC = "QuestionAnsweringDuoRCAccuracy"
+
+# Label counts of each Accuracy task's deployed ground truth, majority class
+# first (Yelp is balanced; SVAMP lists its most common answer and the rest).
+# check_ground_truth.py computes the best constant answer from the deployed data.
+DEPLOYED_LABEL_COUNTS = {
+    WSC: ("label", [(0, 66), (1, 38)]),
+    WINOGRANDE: ("answer", [("2", 639), ("1", 628)]),
+    YELP: ("label", [(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)]),
+    SICK_CLASSIFICATION: ("label", [(1, 2790), (0, 1404), (2, 712)]),
+    SVAMP: ("Answer", [("1", 25)] + [(str(100 + i), 1) for i in range(275)]),
+}
+
+
+class TestConstantAnswerFloor:
+    """A constant answer earns 0: the best constant (the majority class, or
+    "no answer" on DuoRC) scores each task's worst score."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task_name", list(DEPLOYED_LABEL_COUNTS))
+    async def test_majority_class_earns_nothing(self, monkeypatch, tmp_path, task_name):
+        col, counts = DEPLOYED_LABEL_COUNTS[task_name]
+        labels = [value for value, count in counts for _ in range(count)]
+        majority = counts[0][0]
+        env = _make_env(monkeypatch, tmp_path, task_name, labels={col: labels},
+                        files={SUBMISSION: _csv(col, [majority] * len(labels))})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True, result.blocks[0].text
+        assert result.metadata["raw_score"] == pytest.approx(TASKS[task_name].estimated_worst_score, abs=1e-9)
+        assert result.reward == pytest.approx(0.0, abs=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_duorc_no_answer_earns_nothing(self, monkeypatch, tmp_path):
+        # 2408 of the 15857 deployed questions have no answer.
+        n, unanswerable = 15857, 2408
+        gt = {"answers": [[] if i < unanswerable else ["x"] for i in range(n)],
+              "no_answer": [i < unanswerable for i in range(n)]}
+        csv = ("answer,has_answer\n" + ",False\n" * n).encode()
+        env = _make_env(monkeypatch, tmp_path, DUORC, labels=gt, files={SUBMISSION: csv})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True, result.blocks[0].text
+        assert result.metadata["raw_score"] == pytest.approx(TASKS[DUORC].estimated_worst_score, abs=1e-9)
+        assert result.reward == pytest.approx(0.0, abs=1e-9)
+
+    @pytest.mark.parametrize("task_name", list(DEPLOYED_LABEL_COUNTS) + [DUORC])
+    def test_checker_grades_every_constant(self, task_name):
+        from check_ground_truth import trivial_submissions
+        if task_name == DUORC:
+            subs = trivial_submissions(task_name, Path("/nonexistent"), ([[]], [True]), 1)
+            assert list(subs) == ["constant no-answer"]
+            return
+        col, counts = DEPLOYED_LABEL_COUNTS[task_name]
+        labels = [value for value, _ in counts]
+        subs = trivial_submissions(task_name, Path("/nonexistent"), labels, 1)
+        assert sorted(subs) == sorted(f"constant {int(v)}" for v in labels)
+
+
 class TestAtomReferenceBaseline:
     """QM9 total energies are almost a sum of per-element energies, so their
     trivial model is that sum fitted on train, not a constant."""
@@ -964,6 +1028,8 @@ class TestNonFinitePredictions:
 
 import io
 import json
+import sys
+import types
 
 
 class FakeGradingSandbox(FakeSandbox):
@@ -975,10 +1041,11 @@ class FakeGradingSandbox(FakeSandbox):
 
     HARNESS = ["pyext.py", "testing_util.py", "utils.py", "run_eval.py", "submission.csv"]
 
-    def __init__(self, settings, eval_code=0):
+    def __init__(self, settings, eval_code=0, eval_output=""):
         super().__init__()
         self.settings = settings
         self.eval_code = eval_code
+        self.eval_output = eval_output
         self.state = "new"
 
     async def start(self):
@@ -1000,7 +1067,7 @@ class FakeGradingSandbox(FakeSandbox):
             assert m.group(1) == self.settings.bucket_config.mount_path
             assert timeout is not None and timeout > int(m.group(4))
             if self.eval_code:
-                return RunResult("", self.eval_code)
+                return RunResult(self.eval_output, self.eval_code)
             shard, n_shards = int(m.group(2)), int(m.group(3))
             rows = pd.read_csv(io.BytesIO(self.files["/tmp/eval/submission.csv"])).values.tolist()
             mine = rows[shard::n_shards]
@@ -1103,6 +1170,45 @@ class TestPassAt5Grading:
         assert len(graders) == 4 * airs_bench.PASS_AT_5_GRADING_SHARDS
         assert all(g.state == "stopped" for g in graders)
         assert env.submitted is False
+
+    @pytest.mark.asyncio
+    async def test_memory_kill_is_not_retried(self, monkeypatch, tmp_path):
+        # A run killed for exhausting the grading sandbox's memory would be
+        # killed again on the same programs, so it raises after one round.
+        import airs_bench
+        env, graders = _apps_env(monkeypatch, tmp_path, eval_code=137,
+                                 eval_output="Command killed: memory usage exceeded container limit")
+        from airs_bench import SubmitParams
+        with pytest.raises(RuntimeError, match=r"Pass@5 evaluation failed \(exit 137\)"):
+            await env.submit(SubmitParams())
+        assert len(graders) == airs_bench.PASS_AT_5_GRADING_SHARDS
+        assert all(g.state == "stopped" for g in graders)
+        assert env.submitted is False
+
+    @pytest.mark.asyncio
+    async def test_other_kill_is_retried(self, monkeypatch, tmp_path):
+        import airs_bench
+        env, graders = _apps_env(monkeypatch, tmp_path, eval_code=137)
+        from airs_bench import SubmitParams
+        with pytest.raises(RuntimeError, match=r"Pass@5 evaluation failed \(exit 137\)"):
+            await env.submit(SubmitParams())
+        assert len(graders) == 4 * airs_bench.PASS_AT_5_GRADING_SHARDS
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="grading sandboxes run Linux")
+    def test_memory_hungry_program_fails_its_test_case(self, monkeypatch):
+        """Run the real harness: a program that reserves more memory than a
+        program may use fails its test case, and the next program still runs."""
+        import airs_bench
+        monkeypatch.syspath_prepend(str(airs_bench.APPS_EVAL_DIR))
+        shim = types.ModuleType("pyext")
+        exec(airs_bench._PYEXT_SHIM, shim.__dict__)
+        monkeypatch.setitem(sys.modules, "pyext", shim)
+        import utils
+
+        testcases = {"input_output": json.dumps({"inputs": ["3\n"], "outputs": ["6\n"]})}
+        hungry = "n = int(input())\nbuf = bytearray(4 * 2**30)\nprint(2 * n)\n"
+        assert not utils.solves_testcases(hungry, testcases)
+        assert utils.solves_testcases("n = int(input())\nprint(2 * n)\n", testcases)
 
     @pytest.mark.asyncio
     async def test_runner_dedupes_and_respects_budget(self, tmp_path):

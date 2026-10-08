@@ -30,6 +30,8 @@ class TaskConfig:
     # SOTA reference value from the task's AIRS-Bench metadata.yaml, in the
     # units the agent submits. Informational: the reward does not use it.
     sota_score: float | None = None
+    # Score that earns reward 0: the best trivial model's on regression tasks,
+    # the best constant answer's on Accuracy and DuoRC tasks.
     estimated_worst_score: float = 0.0
     optimal_score: float = 1.0
     # Submission format hints
@@ -57,7 +59,7 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["Equation", "Answer", "Type"],
         custom_gold_labels=False,
         sota_score=0.942,
-        estimated_worst_score=0.0,
+        estimated_worst_score=0.0833333333,
         optimal_score=1.0,
         submission_columns=["Answer"],
     ),
@@ -75,7 +77,7 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["answer"],
         custom_gold_labels=False,
         sota_score=0.854,
-        estimated_worst_score=0.4664562,
+        estimated_worst_score=0.5043409629,
         optimal_score=1.0,
         submission_columns=["answer"],
     ),
@@ -93,7 +95,7 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["label"],
         custom_gold_labels=False,
         sota_score=0.962,
-        estimated_worst_score=0.3653846154,
+        estimated_worst_score=0.6346153846,
         optimal_score=1.0,
         submission_columns=["label"],
     ),
@@ -111,7 +113,7 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["label"],
         custom_gold_labels=False,
         sota_score=0.778,
-        estimated_worst_score=0.18208,
+        estimated_worst_score=0.2,
         optimal_score=1.0,
         submission_columns=["label"],
     ),
@@ -129,7 +131,7 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["label"],
         custom_gold_labels=False,
         sota_score=0.905,
-        estimated_worst_score=0.1451284,
+        estimated_worst_score=0.5686913983,
         optimal_score=1.0,
         submission_columns=["label"],
     ),
@@ -165,7 +167,7 @@ TASKS: dict[str, TaskConfig] = {
         columns_to_remove=["answers", "no_answer"],
         custom_gold_labels=True,
         sota_score=0.4648,
-        estimated_worst_score=0.0,
+        estimated_worst_score=0.1518572239,
         optimal_score=1.0,
         submission_columns=["answer", "has_answer"],
     ),
