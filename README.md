@@ -49,6 +49,8 @@ Each agent sandbox runs with 1 CPU and 2GB RAM. Network access is enabled for pa
 
 TimeSeriesForecastingKaggleWebTrafficMASE is not served: a submission is 145,063 full-length series (about 1 GB of CSV), too large to grade in the environment server. `list_tasks` returns the other 19.
 
+CoreferenceResolutionSuperGLUEWSCAccuracy is in the `test` split only (19 tasks), so `train` has 18. Its reward starts above the majority-class accuracy (66 of the 104 validation labels are `0`), and the small models that run in the 2-CPU / 8 GB sandbox do not beat it: a fine-tuned classifier on its 554 training examples, as in the SuperGLUE BERT baseline, only matches the majority class, so every training attempt scores 0.
+
 `check_ground_truth.py` checks each task's ground truth against its grader: the columns it reads exist, a submission reproducing the labels scores the optimum, the agent's test split has one row per label, and each task's worst score is the score of its best trivial model or constant answer.
 
 ## Reward Structure

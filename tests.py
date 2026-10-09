@@ -745,12 +745,34 @@ class TestDeployedGroundTruth:
             (tmp_path / "server_data" / name).mkdir(parents=True)
         out = subprocess.run(
             [sys.executable, "-c",
-             "import json, airs_bench; print(json.dumps([t['id'] for t in airs_bench.AIRSBench.list_tasks('train')]))"],
+             "import json, airs_bench; print(json.dumps([t['id'] for t in airs_bench.AIRSBench.list_tasks('test')]))"],
             cwd=tmp_path, capture_output=True, text=True, check=True,
         ).stdout
         ids = json.loads(out.strip().splitlines()[-1])
         assert KAGGLE not in ids
         assert ids == [n for n in TASK_NAMES if n != KAGGLE]
+
+    def test_wsc_is_served_in_test_but_not_train(self, tmp_path):
+        import json
+        import shutil
+        import subprocess
+        import sys
+        from pathlib import Path
+        here = Path(__file__).parent
+        for f in ("airs_bench.py", "evaluate.py", "task_config.py"):
+            shutil.copy(here / f, tmp_path / f)
+        for name in TASK_NAMES:
+            (tmp_path / "server_data" / name).mkdir(parents=True)
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import json, airs_bench; print(json.dumps({s: [t['id'] for t in airs_bench.AIRSBench.list_tasks(s)]"
+             " for s in ('train', 'test')}))"],
+            cwd=tmp_path, capture_output=True, text=True, check=True,
+        ).stdout
+        ids = json.loads(out.strip().splitlines()[-1])
+        served = [n for n in TASK_NAMES if n != KAGGLE]
+        assert ids["test"] == served
+        assert ids["train"] == [n for n in served if n != WSC]
 
 
 # --- trivial-model baselines ---
