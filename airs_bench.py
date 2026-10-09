@@ -58,6 +58,14 @@ EXCLUDED_TASKS = {
     "TimeSeriesForecastingKaggleWebTrafficMASE": "submission too large to grade",
 }
 
+# Tasks served in the test split but not in train, with the reason.
+TEST_ONLY_TASKS = {
+    # The reward starts above the majority-class accuracy (66/104), which the
+    # small models that fit the 2-CPU / 8 GB sandbox do not beat, so every
+    # attempt earns 0 and the task gives no training signal.
+    "CoreferenceResolutionSuperGLUEWSCAccuracy": "majority class not beaten with sandbox compute",
+}
+
 # Build task specs at module level for stable ordering
 # Only include tasks that have data available
 _task_specs: list[JSONObject] = []
@@ -279,8 +287,9 @@ class AIRSBench(Environment):
 
     @classmethod
     def list_tasks(cls, split: str) -> list[JSONObject]:
-        # Same 20 tasks in both splits
-        if split in ("train", "test"):
+        if split == "train":
+            return [t for t in _task_specs if t["id"] not in TEST_ONLY_TASKS]
+        if split == "test":
             return _task_specs
         return []
 
