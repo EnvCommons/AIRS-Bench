@@ -1,4 +1,4 @@
-openreward[tools]
+openreward[tools]>=0.1.164
 pydantic
 pandas
 pyarrow

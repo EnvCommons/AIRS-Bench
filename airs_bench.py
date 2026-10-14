@@ -22,7 +22,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 from datasets import load_from_disk
-from openreward import AsyncOpenReward, SandboxBucketConfig, SandboxSettings
+from openreward import (AsyncOpenReward, SandboxBucketConfig, SandboxEgressRule,
+                        SandboxNetworkPolicy, SandboxSettings)
 from openreward.environments import Environment, JSONObject, TextBlock, ToolOutput, tool
 from openreward.toolsets import PDFToolset
 from pydantic import BaseModel
@@ -89,6 +90,26 @@ SUBMISSION_PATH = "/home/ubuntu/submission.csv"
 PASS_AT_5_COLUMNS = ["code1", "code2", "code3", "code4", "code5"]
 
 SANDBOX_IMAGE = "generalreasoning/airs-bench-sandbox:latest"
+
+# The agent sandbox reaches PyPI and Hugging Face models, nothing else. Hub
+# datasets and Spaces are denied: they hold the tasks' own test sets (e.g.
+# load_dataset("ChilleD/SVAMP")). The denies come first because "*" also
+# matches "/", so "/*/resolve/*" alone would match /datasets/<repo>/resolve/.
+# Still open: Hub models fine-tuned on a task's own data; closing that needs
+# an allowlist of base models.
+_HF_HOSTS = ("huggingface.co", "hf.co")
+AGENT_NETWORK = SandboxNetworkPolicy(
+    rules=[
+        SandboxEgressRule(action="deny", host=h, path=p)
+        for h in _HF_HOSTS
+        for p in ("/datasets/*", "/api/datasets/*", "/spaces/*", "/api/spaces/*")
+    ] + [
+        SandboxEgressRule(action="allow", host=h, path=p, methods=["GET", "HEAD"])
+        for h in _HF_HOSTS
+        for p in ("/api/models/*", "/api/resolve-cache/models/*", "/*/resolve/*")
+    ],
+    presets=["pypi", "hf-cdn"],
+)
 
 # Pass@5 runs the submitted programs against the hidden test cases in separate
 # grading sandboxes, which mount the task's ground truth. The agent's sandbox
@@ -243,6 +264,7 @@ class AIRSBench(Environment):
             image=SANDBOX_IMAGE,
             machine_size="2:8",
             block_network=False,
+            network=AGENT_NETWORK,
             bucket_config=SandboxBucketConfig(
                 mount_path="/home/ubuntu/data",
                 read_only=True,
