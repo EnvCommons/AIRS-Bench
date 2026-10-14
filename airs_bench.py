@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 from datasets import load_from_disk
-from openreward import AsyncOpenReward, SandboxBucketConfig, SandboxSettings
+from openreward import AsyncOpenReward, SandboxBucketConfig, SandboxNetworkPolicy, SandboxSettings
 from openreward.environments import Environment, JSONObject, TextBlock, ToolOutput, tool
 from openreward.toolsets import PDFToolset
 from pydantic import BaseModel
@@ -243,6 +243,11 @@ class AIRSBench(Environment):
             image=SANDBOX_IMAGE,
             machine_size="2:8",
             block_network=False,
+            # Audit mode: nothing is blocked. The egress proxy logs every request
+            # this policy would deny (Hub model and dataset pages, GitHub, ...)
+            # so an enforced policy (an allowlist of HF base models) can be
+            # chosen from real agent traffic.
+            network=SandboxNetworkPolicy(presets=["pypi", "hf-cdn"], enforce=False),
             bucket_config=SandboxBucketConfig(
                 mount_path="/home/ubuntu/data",
                 read_only=True,
