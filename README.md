@@ -14,7 +14,7 @@
 
 ## Compute Requirements
 
-Each agent sandbox runs with 1 CPU and 2GB RAM. Network access is limited to PyPI and Hugging Face models (Hub datasets and Spaces are blocked). No GPU required for the sandbox (agents work with CPU-friendly approaches or pre-trained models).
+Each agent sandbox runs with 1 CPU and 2GB RAM. Network access is limited to PyPI, Hugging Face models, evaluate's metric scripts, PyG's wheel index (data.pyg.org/whl) and nltk_data (Hub datasets and other Spaces are blocked). No GPU required for the sandbox (agents work with CPU-friendly approaches or pre-trained models).
 
 ## License
 
@@ -98,7 +98,7 @@ Varies by task. NLP tasks with pre-trained models are easier; molecular property
 
 ## Safety
 
-Sandboxed execution environment. Its network reaches PyPI and Hugging Face models only; everything else, including Hub datasets and Spaces, gets HTTP 403 from the egress proxy.
+Sandboxed execution environment. Its network reaches PyPI, Hugging Face models, evaluate's metric scripts, PyG's wheel index and nltk_data only; everything else, including Hub datasets, other Spaces, PyG's dataset mirror and the rest of GitHub, gets HTTP 403 from the egress proxy.
 
 ## Citations
 

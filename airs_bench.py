@@ -91,22 +91,41 @@ PASS_AT_5_COLUMNS = ["code1", "code2", "code3", "code4", "code5"]
 
 SANDBOX_IMAGE = "generalreasoning/airs-bench-sandbox:latest"
 
-# The agent sandbox reaches PyPI and Hugging Face models, nothing else. Hub
-# datasets and Spaces are denied: they hold the tasks' own test sets (e.g.
-# load_dataset("ChilleD/SVAMP")). The denies come first because "*" also
-# matches "/", so "/*/resolve/*" alone would match /datasets/<repo>/resolve/.
+# The agent sandbox reaches PyPI, Hugging Face models and a few tool hosts,
+# nothing else. Hub datasets and Spaces are denied: they hold the tasks' own
+# test sets (e.g. load_dataset("ChilleD/SVAMP")). Rules are first-match and "*"
+# also matches "/", so the denies come before "/*/resolve/*", which alone would
+# match /datasets/<repo>/resolve/. The one Spaces exception is evaluate's metric
+# scripts (evaluate.load("accuracy")), allowed ahead of the Spaces deny.
+# The tool hosts are path-limited because they also serve task data:
+# data.pyg.org/datasets/ has the full labelled QM9, and raw.githubusercontent.com
+# has the ZINC splits, so only PyG's wheel index and nltk_data are reachable.
 # Still open: Hub models fine-tuned on a task's own data; closing that needs
 # an allowlist of base models.
 _HF_HOSTS = ("huggingface.co", "hf.co")
+_READ = ["GET", "HEAD"]
 AGENT_NETWORK = SandboxNetworkPolicy(
     rules=[
+        SandboxEgressRule(action="allow", host=h, path=p, methods=_READ)
+        for h in _HF_HOSTS
+        for p in ("/spaces/evaluate-metric/*", "/api/resolve-cache/spaces/evaluate-metric/*")
+    ] + [
         SandboxEgressRule(action="deny", host=h, path=p)
         for h in _HF_HOSTS
         for p in ("/datasets/*", "/api/datasets/*", "/spaces/*", "/api/spaces/*")
     ] + [
-        SandboxEgressRule(action="allow", host=h, path=p, methods=["GET", "HEAD"])
+        SandboxEgressRule(action="allow", host=h, path=p, methods=_READ)
         for h in _HF_HOSTS
         for p in ("/api/models/*", "/api/resolve-cache/models/*", "/*/resolve/*")
+    ] + [
+        # PyG's compiled extensions (pyg-lib, torch-scatter, torch-cluster, ...)
+        # are only published here: pip install ... -f https://data.pyg.org/whl/torch-<v>+cpu.html
+        SandboxEgressRule(action="allow", host="data.pyg.org", path="/whl/*", methods=_READ),
+        # nltk.download() reads its index and packages from the gh-pages branch.
+        SandboxEgressRule(
+            action="allow", host="raw.githubusercontent.com",
+            path="/nltk/nltk_data/gh-pages/*", methods=_READ,
+        ),
     ],
     presets=["pypi", "hf-cdn"],
 )

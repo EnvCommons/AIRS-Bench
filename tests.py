@@ -1121,6 +1121,51 @@ def _grading_settings(env):
     return captured[0]
 
 
+def _agent_network_allows(method: str, host: str, path: str) -> bool:
+    """First-match evaluation of AGENT_NETWORK's own rules, as the egress proxy
+    does ("*" matches any characters, "/" included). Presets are not modelled,
+    so hosts covered only by a preset read as denied."""
+    from fnmatch import fnmatchcase
+    from airs_bench import AGENT_NETWORK
+    for rule in AGENT_NETWORK.rules:
+        if (rule.host == host
+                and (rule.path is None or fnmatchcase(path, rule.path))
+                and (rule.methods is None or method in rule.methods)):
+            return rule.action == "allow"
+    return False
+
+
+class TestAgentNetwork:
+    @pytest.mark.parametrize("host,path", [
+        ("huggingface.co", "/bert-base-uncased/resolve/main/config.json"),
+        ("huggingface.co", "/api/models/deepset/roberta-base-squad2/revision/main"),
+        ("huggingface.co", "/spaces/evaluate-metric/accuracy/resolve/main/accuracy.py"),
+        ("huggingface.co", "/api/resolve-cache/spaces/evaluate-metric/accuracy/eb64e8b/accuracy.py"),
+        ("hf.co", "/spaces/evaluate-metric/squad/resolve/v0.4.6/compute_score.py"),
+        ("data.pyg.org", "/whl/torch-2.12.0+cpu.html"),
+        ("data.pyg.org", "/whl/torch-2.12.0+cpu/torch_scatter-2.1.2+pt212cpu-cp313-cp313-linux_x86_64.whl"),
+        ("raw.githubusercontent.com", "/nltk/nltk_data/gh-pages/index.xml"),
+        ("raw.githubusercontent.com", "/nltk/nltk_data/gh-pages/packages/tokenizers/punkt_tab.zip"),
+    ])
+    def test_allows_models_and_tools(self, host, path):
+        assert _agent_network_allows("GET", host, path)
+
+    @pytest.mark.parametrize("method,host,path", [
+        ("GET", "huggingface.co", "/datasets/ChilleD/SVAMP/resolve/main/test.csv"),
+        ("GET", "huggingface.co", "/api/datasets/ChilleD/SVAMP"),
+        ("GET", "hf.co", "/datasets/ChilleD/SVAMP/resolve/main/test.csv"),
+        ("GET", "huggingface.co", "/spaces/someone/answers/resolve/main/test.csv"),
+        ("GET", "huggingface.co", "/api/resolve-cache/spaces/someone/answers/abc/test.csv"),
+        ("POST", "huggingface.co", "/spaces/evaluate-metric/accuracy/resolve/main/accuracy.py"),
+        ("GET", "data.pyg.org", "/datasets/qm9_v3.zip"),
+        ("GET", "raw.githubusercontent.com", "/graphdeeplearning/benchmarking-gnns/master/data/molecules/test.index"),
+        ("GET", "raw.githubusercontent.com", "/nltk/nltk_data/master/packages/corpora/x.zip"),
+        ("GET", "github.com", "/nltk/nltk_data"),
+    ])
+    def test_denies_task_data_routes(self, method, host, path):
+        assert not _agent_network_allows(method, host, path)
+
+
 class TestPassAt5Grading:
     def test_agent_sandbox_mounts_only_agent_data(self, monkeypatch, tmp_path):
         env = _make_env(monkeypatch, tmp_path, APPS)
