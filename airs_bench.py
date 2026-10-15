@@ -29,6 +29,7 @@ from openreward.toolsets import PDFToolset
 from pydantic import BaseModel
 
 from evaluate import (
+    MRR_MAX_RANK,
     accuracy_eq,
     accuracy_int,
     duorc_accuracy,
@@ -87,6 +88,14 @@ for task_name in TASK_NAMES:
 REPEAT_SUBMISSION_PENALTY = -0.1
 
 SUBMISSION_PATH = "/home/ubuntu/submission.csv"
+# Largest submission.csv that submit downloads: grading holds the whole file in
+# memory (the download, then the parsed frame), and a file of gigabytes exhausts
+# it. Legitimate submissions are far smaller. The largest are
+# MRR with MRR_MAX_RANK ids for each of 19,210 queries (about 14 MB) and Pass@5
+# with 5 programs for each of 5,000 problems (about 14 MB at the mean length of
+# the APPS reference solutions, about 62 MB if every program were as long as
+# their 99th percentile).
+SUBMISSION_MAX_BYTES = 64 * 1024 * 1024
 PASS_AT_5_COLUMNS = ["code1", "code2", "code3", "code4", "code5"]
 
 SANDBOX_IMAGE = "generalreasoning/airs-bench-sandbox:latest"
@@ -314,7 +323,7 @@ class AIRSBench(Environment):
 ## Research Problem: {self.config.research_problem}
 
 {self.project_description}
-
+{self._submission_notes()}
 ## Environment
 
 You have access to a Linux environment with Python 3.13 and common ML libraries installed.
@@ -340,6 +349,17 @@ Your submission will be evaluated using the **{self.config.metric}** metric.
 You should work from the `/home/ubuntu` directory. Good luck!"""
 
         return [TextBlock(text=prompt)]
+
+    def _submission_notes(self) -> str:
+        """Task-specific rules that override the project description."""
+        if self.config.metric == "MRR":
+            return (f"\n**Rankings are scored to depth {MRR_MAX_RANK}** (this overrides the "
+                    f"description above). List at most the top "
+                    f"{MRR_MAX_RANK} candidate ids per query; ids beyond the first {MRR_MAX_RANK} "
+                    f"are ignored, and a correct id ranked lower scores 0 for that query. Do not "
+                    f"rank the whole corpus: a submission.csv over "
+                    f"{SUBMISSION_MAX_BYTES // 2**20} MiB is not graded.\n")
+        return ""
 
     @tool
     async def bash(self, params: BashParams) -> ToolOutput:
@@ -502,8 +522,8 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
         Reads /home/ubuntu/submission.csv from the sandbox, evaluates it against
         ground truth labels using the task's metric, and returns the score.
         This is a terminal action — you get one graded submission. A submission
-        that cannot be evaluated (missing file, wrong row count, bad format) is
-        not graded and can be fixed and submitted again.
+        that cannot be evaluated (missing file, file too large, wrong row count,
+        bad format) is not graded and can be fixed and submitted again.
         """
         async with self._submit_lock:
             return await self._submit()
@@ -523,9 +543,9 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
         # it can write the file and submit again. A raised sandbox error is
         # infra: _with_retry retries, then re-raises on a persistent failure
         # (-> SDK ToolFailed -> clean terminal) rather than fabricating 0.0.
-        _, exists_code = await self._with_retry(
+        size_output, exists_code = await self._with_retry(
             "check_submission",
-            lambda: self.sandbox.run(f"test -f {SUBMISSION_PATH}"),
+            lambda: self.sandbox.run(f"test -f {SUBMISSION_PATH} && stat -L -c %s {SUBMISSION_PATH}"),
         )
         if exists_code != 0:
             return ToolOutput(
@@ -533,6 +553,22 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
                                        "Nothing was graded. Write your predictions there and "
                                        "call submit again.")],
                 metadata={"error": "submission.csv not found", "graded": False},
+                reward=0.0,
+                finished=False,
+            )
+
+        # An oversized file is refused before it is downloaded.
+        size = int(size_output.strip())
+        if size > SUBMISSION_MAX_BYTES:
+            hint = (f"Keep only the top {MRR_MAX_RANK} candidate ids per query in `rankings`; "
+                    f"ids beyond the first {MRR_MAX_RANK} are not scored. "
+                    if self.config.metric == "MRR" else "")
+            return ToolOutput(
+                blocks=[TextBlock(text=f"Error: submission.csv is {size:,} bytes, over the "
+                                       f"{SUBMISSION_MAX_BYTES:,}-byte limit. Nothing was graded. "
+                                       f"{hint}Make the file smaller and call submit again.")],
+                metadata={"error": "submission too large", "graded": False,
+                          "size_bytes": size, "limit_bytes": SUBMISSION_MAX_BYTES},
                 reward=0.0,
                 finished=False,
             )

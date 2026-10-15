@@ -414,12 +414,18 @@ class FakeSandbox:
     def __init__(self, files=None):
         self.files: dict[str, bytes] = dict(files or {})
         self.commands: list[str] = []
+        self.downloads: list[str] = []
 
     async def run(self, cmd, timeout=300, max_bytes=50_000, sanitise=True):
         self.commands.append(cmd)
         await asyncio.sleep(0)
         if m := re.fullmatch(r"test -f (\S+)", cmd):
             return RunResult("", 0 if m.group(1) in self.files else 1)
+        if m := re.fullmatch(r"test -f (\S+) && stat -L -c %s (\S+)", cmd):
+            assert m.group(1) == m.group(2)
+            if m.group(1) not in self.files:
+                return RunResult("", 1)
+            return RunResult(f"{len(self.files[m.group(1)])}\n", 0)
         if m := re.fullmatch(r"cat (\S+)", cmd):
             if m.group(1) not in self.files:
                 return RunResult(f"cat: {m.group(1)}: No such file or directory", 1)
@@ -439,6 +445,7 @@ class FakeSandbox:
         raise NotImplementedError(cmd)
 
     async def download(self, path):
+        self.downloads.append(path)
         await asyncio.sleep(0)
         if path not in self.files:
             raise RuntimeError(f"Command failed: base64 {path}\nNo such file or directory")
@@ -580,10 +587,96 @@ class TestSubmit:
         assert not any("run_eval.py" in c for c in env.sandbox.commands)
 
     @pytest.mark.asyncio
+    async def test_oversized_submission_is_not_downloaded_or_graded(self, monkeypatch, tmp_path):
+        # Rankings far deeper than are scored, just over the size limit.
+        limit = 64 * 1024 * 1024
+        row = b'sort a list,"[' + b"19209, " * 100_000 + b'0]"\n'
+        big = b"query,rankings\n" + row * (limit // len(row) + 1)
+        assert len(big) > limit
+        env = _make_env(
+            monkeypatch, tmp_path, CODE_RETRIEVAL,
+            labels={"docstring_tokens": [["sort", "a", "list"]], "id": [0]},
+            files={SUBMISSION: big},
+        )
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is False
+        assert result.reward == 0.0
+        assert result.metadata == {"error": "submission too large", "graded": False,
+                                   "size_bytes": len(big), "limit_bytes": limit}
+        assert "top 100 candidate ids per query" in result.blocks[0].text
+        assert env.sandbox.downloads == []
+        assert env.submitted is False
+
+        # The ungraded attempt is not a submission: a fixed file is graded once.
+        env.sandbox.files[SUBMISSION] = b'query,rankings\nsort a list,"[0, 5]"\n'
+        result = await env.submit(SubmitParams())
+        assert result.finished is True
+        assert result.reward == pytest.approx(1.0)
+        assert "already_submitted" not in result.metadata
+        assert env.sandbox.downloads == [SUBMISSION]
+
+    @pytest.mark.asyncio
+    async def test_submission_at_the_size_limit_is_graded(self, monkeypatch, tmp_path):
+        import airs_bench
+        monkeypatch.setattr(airs_bench, "SUBMISSION_MAX_BYTES", len(_csv("label", [1, 2, 3])))
+        env = _make_env(
+            monkeypatch, tmp_path, YELP,
+            labels={"label": [1, 2, 3]},
+            files={SUBMISSION: _csv("label", [1, 2, 3])},
+        )
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True
+        assert result.reward == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
     async def test_upload_file_to_sandbox(self, monkeypatch, tmp_path):
         env = _make_env(monkeypatch, tmp_path, APPS)
         await env._upload_file_to_sandbox("print('hi')\n", "/tmp/eval/x.py")
         assert env.sandbox.files["/tmp/eval/x.py"] == b"print('hi')\n"
+
+
+class TestMRRDepth:
+    LABELS = {"query": ["q0", "q1"], "id": [7, 8]}
+
+    @staticmethod
+    def _ranking(gold, rank, length=150):
+        """`length` distinct ids with `gold` at 1-based position `rank`."""
+        others = [i for i in range(1000, 1000 + length) if i != gold][:length - 1]
+        return others[:rank - 1] + [gold] + others[rank - 1:]
+
+    @pytest.mark.parametrize("rank,expected", [(1, 1.0), (3, 1 / 3), (100, 1 / 100), (101, 0.0), (150, 0.0)])
+    def test_only_top_100_ids_are_scored(self, rank, expected):
+        import json
+        from evaluate import mrr
+        df = pd.DataFrame({
+            "query": ["q0", "q1"],
+            "rankings": [json.dumps(self._ranking(7, rank)), json.dumps(self._ranking(8, 1))],
+        })
+        assert mrr(df, self.LABELS) == pytest.approx((expected + 1.0) / 2)
+
+    @pytest.mark.asyncio
+    async def test_submission_with_long_rankings_grades(self, monkeypatch, tmp_path):
+        import json
+        gt = {"docstring_tokens": [["sort", "a", "list"], ["read", "a", "file"]], "id": [0, 1]}
+        rows = [json.dumps(self._ranking(0, 4)), json.dumps(self._ranking(1, 120))]
+        csv = ("query,rankings\n" + "".join(f'{q},"{r}"\n' for q, r in
+                                            zip(["sort a list", "read a file"], rows))).encode()
+        env = _make_env(monkeypatch, tmp_path, CODE_RETRIEVAL, labels=gt, files={SUBMISSION: csv})
+        from airs_bench import SubmitParams
+        result = await env.submit(SubmitParams())
+        assert result.finished is True
+        assert result.metadata["raw_score"] == pytest.approx((1 / 4 + 0.0) / 2)
+        assert env.sandbox.downloads == [SUBMISSION]
+
+    @pytest.mark.asyncio
+    async def test_prompt_states_the_depth(self, monkeypatch, tmp_path):
+        env = _make_env(monkeypatch, tmp_path, CODE_RETRIEVAL)
+        text = (await env.get_prompt())[0].text
+        assert "List at most the top 100 candidate ids per query" in text
+        yelp = _make_env(monkeypatch, tmp_path, YELP)
+        assert "candidate ids" not in (await yelp.get_prompt())[0].text
 
 
 class TestReadFile:
@@ -1158,7 +1251,7 @@ class TestPassAt5Grading:
         shards = sorted(re.search(r"run_eval.py \S+ (\d+) ", g.commands[-1]).group(1) for g in graders)
         assert shards == [str(k) for k in range(len(graders))]
         # Nothing but reading the submission touches the agent's sandbox.
-        assert env.sandbox.commands == [f"test -f {SUBMISSION}"]
+        assert env.sandbox.commands == [f"test -f {SUBMISSION} && stat -L -c %s {SUBMISSION}"]
 
     @pytest.mark.asyncio
     async def test_failed_eval_retries_on_fresh_sandboxes_then_raises(self, monkeypatch, tmp_path):

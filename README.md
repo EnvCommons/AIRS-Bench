@@ -64,6 +64,10 @@ For the Accuracy tasks (SVAMP, Winogrande, SuperGLUE WSC, Yelp, SICK classificat
 
 Predictions must be finite: a submission with NaN or infinite predictions is not graded and can be fixed and resubmitted. The raw metric, the reward, `metric` and `lower_is_better` are returned in the metadata.
 
+MRR (CodeXGLUE) scores the first 100 ids of each query's `rankings` list: a correct id ranked lower counts as not found (reciprocal rank 0), so ranking the whole 19,210-item corpus adds nothing. The prompt states this.
+
+A `submission.csv` larger than 64 MiB is not graded: `submit` checks the file's size before reading it and reports the size and the limit, and the agent can shrink the file and submit again. The largest legitimate submissions, MRR at 100 ids per query and Pass@5, are typically about 14 MB.
+
 Pass@5 (APPS) runs the submitted programs against the hidden test cases in a separate, network-blocked grading sandbox that mounts the task's ground truth; the agent's sandbox never holds the hidden tests. Each program may allocate up to 1 GiB; past that an allocation fails inside the program, which fails that test case.
 
 ## Data
