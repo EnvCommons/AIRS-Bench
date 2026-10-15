@@ -238,11 +238,19 @@ def spearman_correlation(predictions, labels) -> float:
 # Mean Reciprocal Rank (MRR)
 # ---------------------------------------------------------------------------
 
+# Ranked ids scored per query. A correct id ranked below this would add at
+# most 1/(MRR_MAX_RANK + 1) to its query's reciprocal rank, and ranking the
+# whole corpus makes submission.csv gigabytes long.
+MRR_MAX_RANK = 100
+
+
 def mrr(predictions_df, labels_ds) -> float:
     """
     Mean Reciprocal Rank for code retrieval.
     predictions_df: DataFrame with columns 'query' and 'rankings' (JSON list of IDs)
     labels_ds: HF Dataset with columns 'query' and 'id'
+    Only the first MRR_MAX_RANK ids of each ranking are scored; a correct id
+    ranked lower counts as not found (reciprocal rank 0).
     """
     # Build ground truth mapping: query -> correct id
     gt = {}
@@ -258,7 +266,7 @@ def mrr(predictions_df, labels_ds) -> float:
             reciprocal_ranks.append(0.0)
             continue
         try:
-            rank = rankings.index(correct_id) + 1
+            rank = rankings[:MRR_MAX_RANK].index(correct_id) + 1
             reciprocal_ranks.append(1.0 / rank)
         except ValueError:
             reciprocal_ranks.append(0.0)
