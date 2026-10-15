@@ -88,9 +88,9 @@ for task_name in TASK_NAMES:
 REPEAT_SUBMISSION_PENALTY = -0.1
 
 SUBMISSION_PATH = "/home/ubuntu/submission.csv"
-# Largest submission.csv that submit downloads: download() returns the whole
-# file base64-encoded in one command's output, and a file of gigabytes exhausts
-# the sandbox's memory. Legitimate submissions are far smaller. The largest are
+# Largest submission.csv that submit downloads: grading holds the whole file in
+# memory (the download, then the parsed frame), and a file of gigabytes exhausts
+# it. Legitimate submissions are far smaller. The largest are
 # MRR with MRR_MAX_RANK ids for each of 19,210 queries (about 14 MB) and Pass@5
 # with 5 programs for each of 5,000 problems (about 14 MB at the mean length of
 # the APPS reference solutions, about 62 MB if every program were as long as
@@ -557,8 +557,7 @@ You should work from the `/home/ubuntu` directory. Good luck!"""
                 finished=False,
             )
 
-        # An oversized file is checked before download(), which would buffer
-        # all of it in the sandbox.
+        # An oversized file is refused before it is downloaded.
         size = int(size_output.strip())
         if size > SUBMISSION_MAX_BYTES:
             hint = (f"Keep only the top {MRR_MAX_RANK} candidate ids per query in `rankings`; "
