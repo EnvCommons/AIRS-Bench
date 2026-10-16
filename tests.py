@@ -1407,3 +1407,31 @@ class TestPassAt5Grading:
         uploads = [c for c in env.sandbox.commands if "base64 -d" in c]
         assert len(uploads) == 4
         assert max(len(c) for c in uploads) < 1_100_000
+
+
+def _egress(host: str, path: str, method: str = "GET") -> str:
+    """The first-match verdict of the agent's network policy for one request."""
+    from fnmatch import fnmatchcase
+
+    from airs_bench import AGENT_NETWORK
+
+    for rule in AGENT_NETWORK.rules:
+        if (rule.host == host and (rule.path is None or fnmatchcase(path, rule.path))
+                and (rule.methods is None or method in rule.methods)):
+            return rule.action
+    return "deny"
+
+
+@pytest.mark.parametrize("host, path, verdict", [
+    ("huggingface.co", "/api/models", "allow"),
+    ("huggingface.co", "/api/models/bert-base-uncased", "allow"),
+    ("huggingface.co", "/bert-base-uncased/resolve/main/config.json", "allow"),
+    ("huggingface.co", "/spaces/evaluate-metric/accuracy/resolve/main/accuracy.py", "allow"),
+    ("huggingface.co", "/api/datasets", "deny"),
+    ("huggingface.co", "/api/datasets/ChilleD/SVAMP", "deny"),
+    ("huggingface.co", "/datasets/ChilleD/SVAMP/resolve/main/test.json", "deny"),
+    ("huggingface.co", "/spaces/someone/app/resolve/main/app.py", "deny"),
+    ("data.pyg.org", "/datasets/qm9_v3.zip", "deny"),
+])
+def test_agent_network_policy(host, path, verdict):
+    assert _egress(host, path) == verdict
