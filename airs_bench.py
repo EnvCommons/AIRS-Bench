@@ -106,6 +106,7 @@ SANDBOX_IMAGE = "generalreasoning/airs-bench-sandbox:latest"
 # also matches "/", so the denies come before "/*/resolve/*", which alone would
 # match /datasets/<repo>/resolve/. The one Spaces exception is evaluate's metric
 # scripts (evaluate.load("accuracy")), allowed ahead of the Spaces deny.
+# Model search (huggingface_hub.list_models) is /api/models itself.
 # The tool hosts are path-limited because they also serve task data:
 # data.pyg.org/datasets/ has the full labelled QM9, and raw.githubusercontent.com
 # has the ZINC splits, so only PyG's wheel index and nltk_data are reachable.
@@ -125,7 +126,7 @@ AGENT_NETWORK = SandboxNetworkPolicy(
     ] + [
         SandboxEgressRule(action="allow", host=h, path=p, methods=_READ)
         for h in _HF_HOSTS
-        for p in ("/api/models/*", "/api/resolve-cache/models/*", "/*/resolve/*")
+        for p in ("/api/models", "/api/models/*", "/api/resolve-cache/models/*", "/*/resolve/*")
     ] + [
         # PyG's compiled extensions (pyg-lib, torch-scatter, torch-cluster, ...)
         # are only published here: pip install ... -f https://data.pyg.org/whl/torch-<v>+cpu.html
