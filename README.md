@@ -9,20 +9,20 @@
 ## Capabilities
 
 - End-to-end AI research: problem understanding, data exploration, model building, and prediction
-- Multi-domain evaluation across 6 categories and 20 tasks
+- Multi-domain evaluation across 6 categories (19 of the 20 AIRS-Bench tasks are served)
 - Server-side evaluation with task-specific metrics preventing label leakage
 
 ## Compute Requirements
 
-Each agent sandbox runs with 1 CPU and 2GB RAM. Network access is limited to PyPI, Hugging Face models, evaluate's metric scripts, PyG's wheel index (data.pyg.org/whl) and nltk_data (Hub datasets and other Spaces are blocked). No GPU required for the sandbox (agents work with CPU-friendly approaches or pre-trained models).
+Each agent sandbox runs with 2 CPUs and 8 GB RAM. Network access is limited to PyPI, Hugging Face models, evaluate's metric scripts, PyG's wheel index (data.pyg.org/whl) and nltk_data (Hub datasets and other Spaces are blocked). There is no GPU (agents work with CPU-friendly approaches or pre-trained models). APPS Pass@5 grading runs in separate 4 CPU / 16 GB grading sandboxes.
 
 ## License
 
-[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
+[MIT](https://opensource.org/licenses/MIT).
 
 ## Tasks
 
-20 tasks across 6 categories, available in both `train` and `test` splits:
+There are 19 tasks in the `train` split and 19 in `test`, drawn from the 20 AIRS-Bench tasks across 6 categories:
 
 | Category | Task | Metric |
 |----------|------|--------|
@@ -62,7 +62,7 @@ The raw metric is normalised to a reward in [0, 1]: `(worst - raw) / (worst - op
 
 For the Accuracy tasks (SVAMP, Winogrande, SuperGLUE WSC, Yelp, SICK classification) `worst` is the accuracy of the best constant answer, the majority label of the ground truth, and for DuoRC it is the accuracy of answering "no answer" to every question. A constant answer earns 0.
 
-Predictions must be finite: a submission with NaN or infinite predictions is not graded and can be fixed and resubmitted. The raw metric, the reward, `metric` and `lower_is_better` are returned in the metadata.
+Predictions must be finite: a submission with NaN or infinite predictions is not graded and can be fixed and resubmitted. The first graded submission ends the episode; a repeat submission gets -0.1. No LLM graders are used. The raw metric, the reward, `metric` and `lower_is_better` are returned in the metadata.
 
 MRR (CodeXGLUE) scores the first 100 ids of each query's `rankings` list: a correct id ranked lower counts as not found (reciprocal rank 0), so ranking the whole 19,210-item corpus adds nothing. The prompt states this.
 
@@ -84,12 +84,13 @@ Pass@5 (APPS) runs the submitted programs against the hidden test cases in a sep
 | `list_files` | List directory contents |
 | `read_file` | Read file content (50KB limit) |
 | `write_file` | Write content to a file |
-| `submit` | Submit predictions for evaluation (terminal) |
+| `submit` | Submit predictions for evaluation (ends the episode once graded) |
 | `todo_write` | Plan and track progress |
+| `pdfs_*` | PDF toolset: `pdfs_add_content`, `pdfs_create_pdf`, `pdfs_delete_pdf`, `pdfs_extract_pages`, `pdfs_get_document_overview`, `pdfs_get_metadata`, `pdfs_merge_pdfs`, `pdfs_read_image`, `pdfs_read_page_as_image`, `pdfs_read_pdf_pages`, `pdfs_search_pdf` |
 
 ## Time Horizon
 
-Multi-turn. Agents typically need 20-100+ tool calls to explore data, write code, train models, and produce predictions.
+Multi-turn. Agents explore data, write code, train models and produce predictions before submitting.
 
 ## Environment Difficulty
 
@@ -97,8 +98,7 @@ Varies by task. NLP tasks with pre-trained models are easier; molecular property
 
 ## Other Environment Requirements
 
-- OpenReward API key (for sandbox access)
-- No other external API keys required
+AIRS-Bench needs no external secrets.
 
 ## Safety
 
